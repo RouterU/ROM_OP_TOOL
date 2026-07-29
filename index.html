@@ -142,6 +142,10 @@ body{font-family:'Sora',sans-serif;background:#0f1117;color:#e8e6e0;height:100vh
 .stop-context-item:hover{background:var(--bg3);}
 .stop-context-item.disabled{opacity:.45;cursor:not-allowed;}
 .route-sort{background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text1);font-size:10px;font-family:'Sora',sans-serif;padding:2px 5px;max-width:132px;}
+.route-number-filter{background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text1);font-size:10px;font-family:'Sora',sans-serif;padding:2px 6px;width:92px;min-width:92px;}
+.route-number-filter:focus{outline:none;border-color:var(--accent);}
+.order-route-filter{background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text1);font-size:10px;font-family:'Sora',sans-serif;padding:2px 6px;width:112px;min-width:112px;}
+.order-route-filter:focus{outline:none;border-color:var(--accent);}
 #q-routes .q-header{align-items:center;flex-wrap:wrap;}
 #q-routes .q-title{flex:1 1 auto;}
 .route-filter-check{display:inline-flex;align-items:center;gap:4px;font-size:9px;color:var(--text2);cursor:pointer;white-space:nowrap;}
@@ -462,6 +466,8 @@ body{background:var(--bg0);color:var(--text1);}
         <div class="q-header">
           <span class="q-title">Routes</span>
           <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="showSelectedRoutesOnMap()">Show Selected</button>
+          <input id="route-number-filter" class="route-number-filter" type="search" list="route-number-options" placeholder="Route Number" title="Select or enter a Route Number (UDFNumber1)" oninput="setRouteNumberFilter(this.value)"/>
+          <datalist id="route-number-options"></datalist>
           <select id="route-sort" class="route-sort" onchange="setRouteSort(this.value)" title="Optional route sorting">
             <option value="">Sort By...</option>
             <option value="name">Name</option>
@@ -487,6 +493,8 @@ body{background:var(--bg0);color:var(--text1);}
           <span class="q-title">Unassigned Stops</span>
           <div style="display:flex;gap:5px;align-items:center;">
             <button class="btn success" id="assign-potential-btn" style="display:none;padding:2px 7px;font-size:9px;" onclick="assignToPotentialRoutes()">Assign to Potential Routes</button>
+            <input id="order-route-filter" class="order-route-filter" type="search" list="order-route-options" placeholder="Standard Route" title="Select or enter an order Standard Route" oninput="setOrderRouteFilter(this.value)"/>
+            <datalist id="order-route-options"></datalist>
             <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="showSelectedUnassignedOnMap()">Show Selected</button>
             <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="checkAllUA(true)">All</button>
             <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="checkAllUA(false)">None</button>
@@ -844,6 +852,8 @@ let contextStopId=null;
 let potColors={}; // stopId -> color
 let potRouteSuggestions={}; // stopId -> suggested routeId from Potential Routes job
 let routeSort=""; // optional route sort; blank keeps import/original order
+let routeNumberFilter=""; // optional UDFNumber1 route filter
+let orderRouteFilter=""; // optional Orders Standard Route filter
 let routeSortDirection="desc"; // high-to-low by default
 let activeRouteFilterId=null;
 let activeStopFilterId=null;
@@ -1292,13 +1302,23 @@ function toggleStopFilter(stopId){
 }
 function routeMatchesFilter(route){
   if(activeRouteFilterId&&route.id!==activeRouteFilterId)return false;
+  const routeNumberQuery=(routeNumberFilter||'').toString().trim().toLowerCase();
+  if(routeNumberQuery){
+    const routeNumber=(route?.udfNumber1??'').toString().trim().toLowerCase();
+    if(!routeNumber.includes(routeNumberQuery))return false;
+  }
   return true;
 }
 function stopMatchesFilter(stop){
-  if(activeStopFilterId)return stop.id===activeStopFilterId;
+  if(activeStopFilterId&&stop.id!==activeStopFilterId)return false;
+  const orderRouteQuery=(orderRouteFilter||'').toString().trim().toLowerCase();
+  if(orderRouteQuery){
+    const standardRoute=(stop?.standardRoute??'').toString().trim().toLowerCase();
+    if(!standardRoute.includes(orderRouteQuery))return false;
+  }
   return true;
 }
-function clearLeftFilter(){activeRouteFilterId=null;activeStopFilterId=null;renderRoutes();renderUA();}
+function clearLeftFilter(){activeRouteFilterId=null;activeStopFilterId=null;routeNumberFilter='';orderRouteFilter='';renderRoutes();renderUA();}
 
 function snapshotCurrentMapVisibility(){
   return {
@@ -1353,6 +1373,8 @@ function filterMapToRoute(routeId){
 function clearAllFilters(){
   activeRouteFilterId=null;
   activeStopFilterId=null;
+  routeNumberFilter='';
+  orderRouteFilter='';
   if(mapRouteFilterActiveId){
     restoreMapRouteFilter();
   }else{
@@ -1526,6 +1548,23 @@ function updateRouteSortDirectionLabels(){
   if(desc)desc.textContent=isName?'Z → A':'High → Low';
   if(asc)asc.textContent=isName?'A → Z':'Low → High';
 }
+function uniqueSortedValues(values){
+  return [...new Set((values||[]).map(v=>(v??'').toString().trim()).filter(Boolean))]
+    .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
+}
+function populateFilterDatalist(id,values){
+  const list=document.getElementById(id);
+  if(!list)return;
+  list.innerHTML=uniqueSortedValues(values).map(value=>`<option value="${escapeHtml(value)}"></option>`).join('');
+}
+function setRouteNumberFilter(value){
+  routeNumberFilter=(value??'').toString();
+  renderRoutes();
+}
+function setOrderRouteFilter(value){
+  orderRouteFilter=(value??'').toString();
+  renderUA();
+}
 function setRouteSort(value){
   routeSort=value;
   updateRouteSortDirectionLabels();
@@ -1537,13 +1576,16 @@ function setRouteSortDirection(value){
 }
 function renderRoutes(){
   const el=document.getElementById('routes-list');
+  const routeNumberFilterEl=document.getElementById('route-number-filter');
+  if(routeNumberFilterEl&&routeNumberFilterEl.value!==routeNumberFilter)routeNumberFilterEl.value=routeNumberFilter;
+  populateFilterDatalist('route-number-options',routes.map(r=>r.udfNumber1));
   const sortSelect=document.getElementById('route-sort');
   if(sortSelect)sortSelect.value=routeSort;
   const directionSelect=document.getElementById('route-sort-direction');
   if(directionSelect)directionSelect.value=routeSortDirection;
   updateRouteSortDirectionLabels();
   const visibleRouteCount=routes.filter(routeMatchesFilter).length;
-  document.getElementById('route-badge').innerHTML=activeRouteFilterId?`<span class="filter-pill" onclick="activeRouteFilterId=null;renderRoutes()">Route Filter ×</span>`:routes.length+' routes';
+  document.getElementById('route-badge').innerHTML=(activeRouteFilterId||routeNumberFilter)?`<span class="filter-pill" onclick="activeRouteFilterId=null;routeNumberFilter='';renderRoutes()">${visibleRouteCount} Route${visibleRouteCount===1?'':'s'} ×</span>`:routes.length+' routes';
   if(!routes.length){
     el.innerHTML='<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 13l4.553 2.276A1 1 0 0021 21.382V10.618a1 1 0 00-.553-.894L15 7m0 13V7m0 0L9 4"/></svg><p>No routes yet — import or create one</p></div>';
     return;
@@ -1605,8 +1647,11 @@ function renderRoutes(){
 
 function renderUA(){
   const el=document.getElementById('ua-list');
+  const orderRouteFilterEl=document.getElementById('order-route-filter');
+  if(orderRouteFilterEl&&orderRouteFilterEl.value!==orderRouteFilter)orderRouteFilterEl.value=orderRouteFilter;
+  populateFilterDatalist('order-route-options',stops.filter(s=>!s.routeId).map(s=>s.standardRoute));
   const ua=stops.filter(s=>!s.routeId).filter(stopMatchesFilter);
-  document.getElementById('ua-badge').innerHTML=activeStopFilterId?`<span class="filter-pill" onclick="activeStopFilterId=null;renderRoutes();renderUA()">Stop Filter ×</span>`:ua.length+' stops';
+  document.getElementById('ua-badge').innerHTML=(activeStopFilterId||orderRouteFilter)?`<span class="filter-pill" onclick="activeStopFilterId=null;orderRouteFilter='';renderRoutes();renderUA()">${ua.length} Stop${ua.length===1?'':'s'} ×</span>`:ua.length+' stops';
   if(!ua.length){
     el.innerHTML='<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><p>All stops assigned!</p></div>';
     return;
