@@ -5648,8 +5648,24 @@ function scenarioFormatHMSFromMinutes(minutes){
   const sec=totalSeconds%60;
   return sign+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
 }
+function scenarioCoordinatesFromRow(row){
+  const geoLat=parseFloat(gcLoose(row,['GeocodeLatitude']));
+  const geoLng=parseFloat(gcLoose(row,['GeocodeLongitude']));
+  if(Number.isFinite(geoLat)&&Number.isFinite(geoLng))return {lat:geoLat,lng:geoLng};
+  const rawLat=parseFloat(gcLoose(row,['Latitude']));
+  const rawLng=parseFloat(gcLoose(row,['Longitude']));
+  if(Number.isFinite(rawLat)&&Number.isFinite(rawLng))return {lat:rawLat,lng:rawLng};
+  return {lat:null,lng:null};
+}
+function scenarioCoordinatesFromGroup(group){
+  for(const row of (group||[])){
+    const coords=scenarioCoordinatesFromRow(row);
+    if(Number.isFinite(coords.lat)&&Number.isFinite(coords.lng))return coords;
+  }
+  return {lat:null,lng:null};
+}
 function scenarioRouteDataDepot(row,suffix){
-  const lat=parseFloat(gcLoose(row,['GeocodeLatitude','Latitude'])); const lng=parseFloat(gcLoose(row,['GeocodeLongitude','Longitude']));
+  const {lat,lng}=scenarioCoordinatesFromRow(row);
   const key=sval(gcLoose(row,['LocationKey']))||('ROUTE_DATA_DEPOT_'+suffix);
   return {id:uid(),locationKey:key,name:sval(gcLoose(row,['Customer','Company']))||key,locationType:'DEPOT',branchDivision:'',market:'',comment:'Imported from Route Detail Summary',shipStreet:sval(gcLoose(row,['Street Name','ShipStreetName','Ship Street Name'])),shipCity:sval(gcLoose(row,['City','ShipCity'])),shipState:sval(gcLoose(row,['State','ShipState'])),shipZipCode:sval(gcLoose(row,['Zipcode','ShipZipcode','ShipZipCode'])),lat:Number.isFinite(lat)?lat:null,lng:Number.isFinite(lng)?lng:null,raw:{...row}};
 }
@@ -5687,7 +5703,7 @@ function importScenarioRouteData(data){
     customers.forEach(row=>{const loc=sval(gcLoose(row,['LocationKey']))||sval(gcLoose(row,['Customer']));const k=loc.toUpperCase();if(!grouped.has(k))grouped.set(k,[]);grouped.get(k).push(row);});
     grouped.forEach(group=>{
       group.sort((a,b)=>scenarioCleanFormula(gcLoose(a,['GeoStopNumber']))-scenarioCleanFormula(gcLoose(b,['GeoStopNumber']))); const base=group[0]; const orders=group.map(scenarioOrderFromRow);
-      const lat=parseFloat(gcLoose(base,['GeocodeLatitude','Latitude'])), lng=parseFloat(gcLoose(base,['GeocodeLongitude','Longitude'])); const seq=Math.min(...group.map(r=>scenarioCleanFormula(gcLoose(r,['GeoStopNumber']))).filter(n=>Number.isFinite(n)&&n>0));
+      const {lat,lng}=scenarioCoordinatesFromGroup(group); const seq=Math.min(...group.map(r=>scenarioCleanFormula(gcLoose(r,['GeoStopNumber']))).filter(n=>Number.isFinite(n)&&n>0));
       const service=Math.max(0,...group.map(r=>scenarioDurationSeconds(gcLoose(r,['StopServiceTime'])))); const wait=group.reduce((a,r)=>a+scenarioDurationSeconds(gcLoose(r,['WaitTime'])),0);
       const early=orders.map(o=>o.earliestRaw).filter(Boolean).sort()[0]||'', late=orders.map(o=>o.latestRaw).filter(Boolean).sort().slice(-1)[0]||'';
       const stop={id:uid(),sourceType:'route-data',routeId:route.id,seq:Number.isFinite(seq)?seq:1,orderNumber:orders.map(o=>o.orderNumber).filter(Boolean).join(', '),orderNumbers:orders.map(o=>o.orderNumber).filter(Boolean),customerName:sval(gcLoose(base,['Customer']))||sval(gcLoose(base,['LocationKey']))||'Route Stop',locationKey:sval(gcLoose(base,['LocationKey'])),shipToId:sval(gcLoose(base,['LocationKey'])),customerNumber:sval(gcLoose(base,['LocationKey'])),scenarioOriginalRouteId:route.id,scenarioOriginalDepotKey:sval(init?.locationKey||fin?.locationKey||''),scenarioDepotAnchor:sval(gcLoose(base,['LocationKey'])).trim().toUpperCase().startsWith('D'),scenarioOriginalSeq:Number.isFinite(seq)?seq:1,address:sval(gcLoose(base,['Street Name'])),city:sval(gcLoose(base,['City'])),state:sval(gcLoose(base,['State'])),zip:sval(gcLoose(base,['Zipcode'])),country:'US',lat:Number.isFinite(lat)?lat:null,lng:Number.isFinite(lng)?lng:null,dryCases:orders.reduce((a,o)=>a+o.cases,0),dryCube:0,dryWeight:0,coolerCases:0,coolerCube:0,coolerWeight:0,frozenCases:0,frozenCube:0,frozenWeight:0,pkgCases:0,pkgCube:0,pkgWeight:0,fixedServiceTime:service,variableServiceTime:0,earliestTimeWindow:scenarioTime(early),latestTimeWindow:scenarioTime(late),earliestTimeWindowRaw:early,latestTimeWindowRaw:late,preferredResourceKey:sval(gcLoose(base,['PreferredResource'])),preferredRouteSequence:sval(gcLoose(base,['Pref Rt Position'])),orderType:sval(gcLoose(base,['Ignore']))||'Imported Route Data',orderStatus:'',district:'',willCallIndicator:'',comment:sval(gcLoose(base,['ViolationDescription'])),orders,routeData:{resourceKey,geoSequences:group.map(r=>scenarioCleanFormula(gcLoose(r,['GeoStopNumber']))),plannedArrived:sval(gcLoose(base,['Planned Arrived Date'])),plannedBegun:sval(gcLoose(base,['Planned Begun Date'])),plannedCompleted:sval(gcLoose(base,['Planned Completed Date'])),stopServiceSeconds:service,waitSeconds:wait,distanceMile:group.reduce((a,r)=>a+scenarioCleanFormula(gcLoose(r,['DistanceMile'])),0),driveSeconds:group.reduce((a,r)=>a+scenarioDurationSeconds(gcLoose(r,['DriveTime'])),0),ignoreValues:[...new Set(orders.map(o=>o.ignoreType).filter(Boolean))],rawRows:group.map(r=>({...r}))},raw:{...base},lockStart:false,lockFinal:false};
