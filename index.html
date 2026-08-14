@@ -5798,7 +5798,7 @@ function scenarioBestRuntimeDestination(stop,fromRoute,opts){
       // lower route hours/miles. This keeps runtime repair aligned to efficiency.
       const activePenalty=scenarioRouteHasCustomerWork(route.id)?0:250;
       const minGap=opts.minRouteHours>0?Math.max(0,opts.minRouteHours-evaluated.sim.hours):0;
-      const score=evaluated.sim.late*1000000+evaluated.sim.waitMinutes*120+activePenalty+minGap*30+evaluated.sim.hours*60+evaluated.sim.miles*2;
+      const score=evaluated.sim.late*1000000+evaluated.sim.waitMinutes*20+activePenalty+minGap*30+evaluated.sim.hours*2+evaluated.sim.miles*.1;
       if(!best||score<best.score)best={route,customers:candidate,order:evaluated.order,sim:evaluated.sim,score};
     }
   }
@@ -5916,67 +5916,13 @@ function scenarioRepairRuntimeLimits(opts){
   }
   return stats;
 }
-function scenarioOptimizationScore(sim,opts,baseMiles=0){
-  if(!sim)return Infinity;
-  if(opts.maxRouteHours>0&&sim.hours>opts.maxRouteHours+1e-6)return Infinity;
-  // Operational priority: protect service first, then aggressively control wait,
-  // then reduce total route time and miles. Wait is deliberately expensive so
-  // the optimizer cannot create a low-mile solution by parking drivers early.
-  let score=sim.late*1000000 + sim.waitMinutes*120;
-  if(opts.optTime)score+=sim.hours*60;
-  if(opts.optMiles)score+=Math.max(0,sim.miles-baseMiles)*2;
-  if(!opts.optMiles&&!opts.optTime)score+=sim.miles*2;
-  if(opts.minRouteHours>0&&sim.hours<opts.minRouteHours)score+=(opts.minRouteHours-sim.hours)*500;
-  return score;
-}
-function scenarioWaitGuardrail(candidate,baseline){
-  if(!candidate||!baseline)return false;
-  // Never accept a voluntary optimization that creates more late stops.
-  if(candidate.late>baseline.late)return false;
-  // If service improves (fewer late stops), allow a small amount of additional
-  // wait, but never a large increase. Otherwise wait may not increase at all.
-  const allowance=candidate.late<baseline.late?Math.min(15,Math.max(5,baseline.waitMinutes*.10)):1;
-  return candidate.waitMinutes<=baseline.waitMinutes+allowance+1e-6;
-}
-function scenarioRouteImproves(candidate,baseline,opts){
-  if(!scenarioWaitGuardrail(candidate,baseline))return false;
-  if(candidate.late<baseline.late)return true;
-  if(candidate.waitMinutes<baseline.waitMinutes-1e-6)return true;
-  if(opts.optTime&&candidate.hours<baseline.hours-1e-6)return true;
-  if(opts.optMiles&&candidate.miles<baseline.miles-0.05)return true;
-  return false;
-}
+function scenarioOptimizationScore(sim,opts,baseMiles=0){if(!sim)return Infinity;if(opts.maxRouteHours>0&&sim.hours>opts.maxRouteHours+1e-6)return Infinity;let score=sim.late*1000000+sim.waitMinutes*5;if(opts.optTime)score+=sim.hours*60;if(opts.optMiles)score+=Math.max(0,sim.miles-baseMiles);if(!opts.optMiles&&!opts.optTime)score+=sim.miles;if(opts.minRouteHours>0&&sim.hours<opts.minRouteHours)score+=(opts.minRouteHours-sim.hours)*500;return score;}
 function scenarioSequenceRoute(routeId,opts){
-  const route=routes.find(r=>r.id===routeId);if(!route)return;
-  const original=stops.filter(s=>s.routeId===routeId&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);
-  const originalSim=scenarioEvaluateOrderedRoute(route,original,scenarioOriginalStart(route));
-  const anchors=original.filter(scenarioIsDepotStop),customerList=original.filter(s=>!scenarioIsDepotStop(s));
-  if(customerList.length<2){scenarioApplyRouteOrder(routeId,scenarioComposePreservingDepots(routeId,customerList));return;}
-  const locked=opts.removeSequenceLock?[]:customerList.filter(s=>preferredPosition(s)>0);
-  const movable=customerList.filter(s=>!locked.includes(s));
-  let cur=routeInitialDepot(route)||anchors[0]||movable[0]||locked[0],ordered=[],cursor=scenarioOriginalStart(route);
-  while(movable.length){
-    let bestI=0,best=Infinity;
-    movable.forEach((s,i)=>{
-      const legMiles=(cur&&cur.lat&&cur.lng)?roadAdjustedMiles(haversine(cur.lat,cur.lng,s.lat,s.lng)):0;
-      const travelMins=driveMinutesForMiles(legMiles/1.25),w=scenarioStopWindow(s),arrival=cursor+travelMins;
-      const wait=Number.isFinite(w.early)&&arrival<w.early?w.early-arrival:0;
-      const late=Number.isFinite(w.late)?Math.max(0,arrival+wait-w.late):0;
-      // Greedy construction also makes wait a major penalty, not a tie-breaker.
-      let score=late*1000000 + wait*120 + travelMins + legMiles*2;
-      if(score<best){best=score;bestI=i;}
-    });
-    const next=movable.splice(bestI,1)[0];
-    const legMiles=(cur&&cur.lat&&cur.lng)?roadAdjustedMiles(haversine(cur.lat,cur.lng,next.lat,next.lng)):0;
-    cursor+=driveMinutesForMiles(legMiles/1.25);const w=scenarioStopWindow(next);
-    if(Number.isFinite(w.early)&&cursor<w.early)cursor=w.early;
-    cursor+=stopServiceMinutes(next);ordered.push(next);cur=next;
-  }
+  const route=routes.find(r=>r.id===routeId);if(!route)return;const original=stops.filter(s=>s.routeId===routeId&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);const anchors=original.filter(scenarioIsDepotStop);const customerList=original.filter(s=>!scenarioIsDepotStop(s));if(customerList.length<2){scenarioApplyRouteOrder(routeId,scenarioComposePreservingDepots(routeId,customerList));return;}
+  const locked=opts.removeSequenceLock?[]:customerList.filter(s=>preferredPosition(s)>0);const movable=customerList.filter(s=>!locked.includes(s));let cur=routeInitialDepot(route)||anchors[0]||movable[0]||locked[0],ordered=[],cursor=scenarioOriginalStart(route);
+  while(movable.length){let bestI=0,best=Infinity;movable.forEach((s,i)=>{const legMiles=(cur&&cur.lat&&cur.lng)?roadAdjustedMiles(haversine(cur.lat,cur.lng,s.lat,s.lng)):0;const travelMins=driveMinutesForMiles(legMiles/1.25),w=scenarioStopWindow(s),arrival=cursor+travelMins,wait=Number.isFinite(w.early)&&arrival<w.early?w.early-arrival:0,late=Number.isFinite(w.late)?Math.max(0,arrival+wait-w.late):0;let score=late*1000000+wait*5+(opts.optTime?travelMins:legMiles);if(score<best){best=score;bestI=i;}});const next=movable.splice(bestI,1)[0];const legMiles=(cur&&cur.lat&&cur.lng)?roadAdjustedMiles(haversine(cur.lat,cur.lng,next.lat,next.lng)):0;cursor+=driveMinutesForMiles(legMiles/1.25);const w=scenarioStopWindow(next);if(Number.isFinite(w.early)&&cursor<w.early)cursor=w.early;cursor+=stopServiceMinutes(next);ordered.push(next);cur=next;}
   if(!opts.removeSequenceLock&&locked.length){locked.sort((a,b)=>preferredPosition(a)-preferredPosition(b));locked.forEach(s=>{const pos=Math.max(0,Math.min(ordered.length,preferredPosition(s)-1));ordered.splice(pos,0,s);});}
-  const composed=scenarioComposePreservingDepots(routeId,ordered),sim=scenarioEvaluateOrderedRoute(route,composed,scenarioOriginalStart(route));
-  // Do not accept a prettier mileage path if it creates operationally harmful wait.
-  if(scenarioRuntimeOk(sim,opts,true)&&scenarioRouteImproves(sim,originalSim,opts))scenarioApplyRouteOrder(routeId,composed);
-  else scenarioApplyRouteOrder(routeId,original);
+  const composed=scenarioComposePreservingDepots(routeId,ordered),sim=scenarioEvaluateOrderedRoute(route,composed,scenarioOriginalStart(route));if(scenarioRuntimeOk(sim,opts,true))scenarioApplyRouteOrder(routeId,composed);else scenarioApplyRouteOrder(routeId,original);
 }
 function scenarioGlobalOptimize(opts){
   const assigned=stops.filter(s=>s.sourceType==='route-data'&&s.routeId&&s.lat&&s.lng&&!scenarioIsDepotStop(s));if(!opts.removeRouteLock){routes.forEach(r=>scenarioSequenceRoute(r.id,opts));return;}
@@ -6143,7 +6089,7 @@ function scenarioReportMetricNeutral(label,key,formatter){const r=scenarioLastRu
 function openScenarioAfterActionReport(){
   if(!scenarioLastRun){if(!scenarioBaseline){showToast('No scenario baseline is available yet.');return;}showToast('Run Model first to create an After Action comparison.');return;}const r=scenarioLastRun,o=r.original,m=r.modeled;const expenseRows=(o.expense!==undefined&&o.expense!==null)?scenarioReportMetric('Estimated Delivery Expense','expense',v=>formatCurrency(v),true):'';
   document.querySelector('#scenario-report-modal h2').textContent=r.mode==='lite'?'Scenario After Action Report — Lite ReOp':'Scenario After Action Report';const summary=document.getElementById('scenario-report-summary');summary.innerHTML=`<div class="scenario-kpi-grid"><div class="scenario-kpi"><div class="v">${scenarioFmt(o.cases,0)} → ${scenarioFmt(m.cases,0)}</div><div class="l">Cases Planned</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.miles)} → ${scenarioFmt(m.miles)}</div><div class="l">Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.hours)} → ${scenarioFmt(m.hours)}</div><div class="l">Route Hours</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.onTimePct)}% → ${scenarioFmt(m.onTimePct)}%</div><div class="l">Planned On Time</div></div></div><div class="scenario-note"><strong>${r.mode==='lite'?'Lite ReOp':'Model'} actions:</strong> ${r.removed.removedOrders} order line(s) / ${scenarioFmt(r.removed.removedCases,0)} cases moved to Unassigned${r.removed.runtime?`; runtime balancing moved ${r.removed.runtime.movedStops} stop(s) between routes, retired ${r.removed.runtime.retiredRoutes} under-minimum route(s), and sent ${r.removed.runtime.unassignedOrders} order line(s) / ${scenarioFmt(r.removed.runtime.unassignedCases,0)} cases to Unassigned because they could not be placed within the selected route-runtime rules`:''}${r.mode==='lite'?`; existing route assignments and imported stop sequence were preserved; surviving stops were not moved between routes and routes were not condensed; routes left with zero customer stops remain present and are counted as Empty Routes; optimization, dispatch optimization, and runtime balancing were not run`:''}. Route Lock ${r.options.removeRouteLock?'removed':'retained'}; Sequence Lock ${r.options.removeSequenceLock?'removed':'retained'}; Miles optimization ${r.options.optMiles?'on':'off'}; Time optimization ${r.options.optTime?'on':'off'}; Dispatch optimization ${r.options.optDispatch?'on':'off'}; Route Run Time ${r.options.minRouteHours?`min ${scenarioFmt(r.options.minRouteHours,2)}h`:'no min'} / ${r.options.maxRouteHours?`max ${scenarioFmt(r.options.maxRouteHours,2)}h`:'no max'}. Depot LocationKeys beginning with D were retained on their original route and fixed sequence.</div>`;
-  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Routes Used','routesUsed',v=>scenarioFmt(v,0),true)}${scenarioReportMetricNeutral('Empty Routes','emptyRoutes',v=>scenarioFmt(v,0))}${scenarioReportMetric('Miles Ran','miles',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Hours Ran','hours',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',v=>scenarioFmt(v,1)+'%',false)}${scenarioReportMetric('Wait Time (HH:MM:SS)','waitMinutes',v=>scenarioFormatHMSFromMinutes(v),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">Original miles/hours come from imported TotalDistanceMile and TotalTime. Modeled miles use geolocation-based road-distance estimates (straight-line × 1.25); modeled time uses the selected vehicle travel factor, imported stop service time, expanded windows, and modeled wait. Full optimization uses a wait-time guardrail: voluntary sequence/mileage improvements are rejected when they materially increase wait, with late-delivery protection taking first priority. Route runtime limits are enforced by redistributing eligible work or moving work that cannot fit to Unassigned; they no longer cancel the model.${r.removed.runtimeViolations?.length?` <strong>Runtime review:</strong> ${escapeHtml(r.removed.runtimeViolations.join(' | '))}`:''} This is a planning what-if model, not a turn-by-turn commercial routing engine.</div>`;document.getElementById('scenario-report-modal').style.display='flex';
+  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Routes Used','routesUsed',v=>scenarioFmt(v,0),true)}${scenarioReportMetricNeutral('Empty Routes','emptyRoutes',v=>scenarioFmt(v,0))}${scenarioReportMetric('Miles Ran','miles',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Hours Ran','hours',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',v=>scenarioFmt(v,1)+'%',false)}${scenarioReportMetric('Wait Time (HH:MM:SS)','waitMinutes',v=>scenarioFormatHMSFromMinutes(v),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">Original miles/hours come from imported TotalDistanceMile and TotalTime. Modeled miles use geolocation-based road-distance estimates (straight-line × 1.25); modeled time uses the selected vehicle travel factor, imported stop service time, expanded windows, and modeled wait. Route runtime limits are enforced by redistributing eligible work or moving work that cannot fit to Unassigned; they no longer cancel the model.${r.removed.runtimeViolations?.length?` <strong>Runtime review:</strong> ${escapeHtml(r.removed.runtimeViolations.join(' | '))}`:''} This is a planning what-if model, not a turn-by-turn commercial routing engine.</div>`;document.getElementById('scenario-report-modal').style.display='flex';
 }
 
 // ============================================================
