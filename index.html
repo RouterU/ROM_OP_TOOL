@@ -6686,14 +6686,305 @@ function runScenarioModel(){
   scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),modeled:scenarioClone(modeled)};
   scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
 }
+
+
+// ============================================================
+// FULL MODEL OPTIMIZER v16 — FREIGHT-FIRST NETWORK OPTIMIZER
+// Reconstructed after comparing original vs modeled results.
+// Priorities:
+//   1) Preserve shipped freight / minimize Unassigned work.
+//   2) Enforce hard cube + weight and normal-route maximum runtime.
+//   3) Respect depot, route locks, D/L anchors, layovers, and B backhauls.
+//   4) Protect on-time performance and aggressively minimize wait.
+//   5) Improve hours/miles only after the network is feasible.
+// ============================================================
+var scenarioModelCalibration={distanceFactor:1.25,effectiveMph:35,sampleRoutes:0};
+
+function scenarioMedian(values){
+  const a=(values||[]).filter(Number.isFinite).sort((x,y)=>x-y);
+  if(!a.length)return null;const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2;
+}
+function scenarioClamp(v,min,max){return Math.max(min,Math.min(max,v));}
+function scenarioRouteIsBackhaulOnly(route){
+  if(!route)return false;
+  const cs=scenarioRouteCustomerStops(route.id);
+  return cs.length>0&&cs.every(s=>scenarioIsBackhaulStop(s));
+}
+function scenarioRouteExemptFromNormalRuntime(route){return scenarioRouteIsLayover(route)||scenarioRouteIsBackhaulOnly(route);}
+function scenarioRouteIsProtectedLongHaul(route){return scenarioRouteIsBackhaulOnly(route);}
+function scenarioPathStraightMiles(route,orderedStops){
+  const pts=[];const init=routeInitialDepot(route),fin=routeFinalDepot(route);
+  const push=p=>{if(!p||!Number.isFinite(parseFloat(p.lat))||!Number.isFinite(parseFloat(p.lng)))return;const last=pts[pts.length-1];if(last&&Math.abs(last.lat-p.lat)<1e-7&&Math.abs(last.lng-p.lng)<1e-7)return;pts.push({lat:+p.lat,lng:+p.lng});};
+  push(init);(orderedStops||[]).filter(s=>s.lat&&s.lng).forEach(push);push(fin);
+  let miles=0;for(let i=1;i<pts.length;i++)miles+=haversine(pts[i-1].lat,pts[i-1].lng,pts[i].lat,pts[i].lng);return miles;
+}
+function scenarioBuildTravelCalibration(){
+  const ratios=[],speeds=[];
+  routes.forEach(route=>{
+    if(!scenarioRouteHasCustomerWork(route.id)||scenarioRouteIsLayover(route)||scenarioRouteIsBackhaulOnly(route))return;
+    const rs=stops.filter(s=>s.routeId===route.id&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);
+    const straight=scenarioPathStraightMiles(route,rs),impMiles=parseFloat(route.routeData?.totalDistanceMile)||0,impHours=(parseFloat(route.routeData?.totalTimeSeconds)||0)/3600;
+    if(straight>3&&impMiles>3){const ratio=impMiles/straight;if(ratio>.8&&ratio<3)ratios.push(ratio);}
+    if(impMiles>3&&impHours>.25){
+      const svc=scenarioRouteCustomerStops(route.id).reduce((a,s)=>a+stopServiceMinutes(s),0)/60;
+      const wait=scenarioRouteCustomerStops(route.id).reduce((a,s)=>a+(parseFloat(s.routeData?.waitSeconds)||0)/3600,0);
+      const drive=Math.max(.15,impHours-svc-wait);const mph=impMiles/drive;if(mph>10&&mph<75)speeds.push(mph);
+    }
+  });
+  const ratio=scenarioMedian(ratios),mph=scenarioMedian(speeds);
+  scenarioModelCalibration={distanceFactor:scenarioClamp(Number.isFinite(ratio)?ratio:1.25,1.02,1.85),effectiveMph:scenarioClamp(Number.isFinite(mph)?mph:35,22,55),sampleRoutes:Math.max(ratios.length,speeds.length)};
+  return scenarioModelCalibration;
+}
+function scenarioModelLegMiles(a,b){
+  if(!a||!b||!a.lat||!a.lng||!b.lat||!b.lng)return 0;
+  return haversine(+a.lat,+a.lng,+b.lat,+b.lng)*(scenarioModelCalibration?.distanceFactor||1.25);
+}
+function scenarioModelDriveMinutes(miles){
+  const mph=Math.max(5,scenarioModelCalibration?.effectiveMph||35);
+  const vehicleFactor=travelModelFactor();
+  return ((parseFloat(miles)||0)/mph)*60*vehicleFactor;
+}
+function scenarioRouteTravelMiles(route,orderedStops){
+  const pts=[];const init=routeInitialDepot(route),fin=routeFinalDepot(route);
+  if(init&&init.lat&&init.lng)pts.push(init);(orderedStops||[]).filter(s=>s.lat&&s.lng).forEach(s=>pts.push(s));if(fin&&fin.lat&&fin.lng)pts.push(fin);
+  let miles=0;for(let i=1;i<pts.length;i++)miles+=scenarioModelLegMiles(pts[i-1],pts[i]);return miles;
+}
+function scenarioEvaluateOrderedRoute(route,rs,startEpoch){
+  const layoverRoute=scenarioRouteIsLayover(route);
+  if(!rs.length)return {miles:0,hours:0,waitMinutes:0,maxStopWaitMinutes:0,onTime:0,windowStops:0,late:0,startEpoch,endEpoch:startEpoch,stops:[],isLayover:layoverRoute,isBackhaulOnly:scenarioRouteIsBackhaulOnly(route),segmentHours:[]};
+  let cursor=startEpoch,prev=routeInitialDepot(route),miles=0,wait=0,onTime=0,windowStops=0,late=0,details=[];
+  let activeMinutes=0,segmentActive=0,segmentIndex=0;const segmentHours=[];
+  for(let idx=0;idx<rs.length;idx++){
+    const s=rs[idx];let legMins=0;
+    if(prev&&prev.lat&&prev.lng&&s.lat&&s.lng){const leg=scenarioModelLegMiles(prev,s);miles+=leg;legMins=scenarioModelDriveMinutes(leg);cursor+=legMins;activeMinutes+=legMins;segmentActive+=legMins;}
+    if(scenarioIsLayoverStop(s)){
+      details.push({stopId:s.id,arrive:cursor,serviceStart:cursor,ok:true,wait:0,layover:true,segmentIndex});segmentHours.push(segmentActive/60);segmentActive=0;segmentIndex++;
+      const rawDepart=(s.orders||[]).map(o=>o.plannedDepartedRaw).find(Boolean)||gcLoose(s.raw||{},['Planned Departed Date']);const departEpoch=scenarioEpochMinutes(rawDepart);
+      if(Number.isFinite(departEpoch)&&departEpoch>cursor)cursor=departEpoch;else{const next=rs.slice(idx+1).find(x=>!scenarioIsLayoverStop(x));const nextEarly=next?scenarioStopWindow(next).early:null;if(Number.isFinite(nextEarly)&&nextEarly>cursor+240)cursor=nextEarly;else cursor+=12*60;}
+      prev=s;continue;
+    }
+    const w=scenarioStopWindow(s),rawArrival=cursor;let serviceStart=cursor,stopWait=0;
+    if(Number.isFinite(w.early)&&serviceStart<w.early){stopWait=w.early-serviceStart;wait+=stopWait;serviceStart=w.early;activeMinutes+=stopWait;segmentActive+=stopWait;}
+    let ok=true;if(Number.isFinite(w.late)){windowStops++;if(serviceStart<=w.late){onTime++;}else{ok=false;late++;}}
+    const svc=stopServiceMinutes(s);cursor=serviceStart+svc;activeMinutes+=svc;segmentActive+=svc;details.push({stopId:s.id,arrive:rawArrival,serviceStart,ok,wait:stopWait,segmentIndex});prev=s;
+  }
+  const fin=routeFinalDepot(route);if(prev&&fin&&prev.lat&&prev.lng&&fin.lat&&fin.lng){const leg=scenarioModelLegMiles(prev,fin);miles+=leg;const mins=scenarioModelDriveMinutes(leg);cursor+=mins;activeMinutes+=mins;segmentActive+=mins;}
+  if(layoverRoute)segmentHours.push(segmentActive/60);
+  return {miles,hours:activeMinutes/60,waitMinutes:wait,maxStopWaitMinutes:details.reduce((m,d)=>Math.max(m,parseFloat(d.wait)||0),0),onTime,windowStops,late,startEpoch,endEpoch:cursor,stops:details,isLayover:layoverRoute,isBackhaulOnly:scenarioRouteIsBackhaulOnly(route),segmentHours};
+}
+function scenarioRuntimeOk(sim,opts,allowBelowMin=false){
+  if(!sim)return false;
+  if(sim.isBackhaulOnly)return true;
+  if(sim.isLayover)return scenarioLayoverRuntimeOk(sim);
+  if(opts.maxRouteHours>0&&sim.hours>opts.maxRouteHours+1e-6)return false;
+  if(!allowBelowMin&&opts.minRouteHours>0&&sim.hours+1e-6<opts.minRouteHours)return false;
+  return true;
+}
+function scenarioWaitPenalty(sim,opts){
+  if(!sim)return 1e12;const allowed=Math.max(0,parseFloat(opts?.allowedWaitMinutes)||0);let over=0;
+  (sim.stops||[]).forEach(d=>{if(d.layover)return;over+=Math.max(0,(parseFloat(d.wait)||0)-allowed);});
+  // Every wait minute costs something. Minutes above the user's allowance cost
+  // far more, but wait alone never makes us discard otherwise serviceable freight.
+  return (parseFloat(sim.waitMinutes)||0)*120+over*12000;
+}
+function scenarioNetworkRouteScore(route,sim,opts,baseSim=null){
+  if(!sim)return Infinity;let score=sim.late*2500000+scenarioWaitPenalty(sim,opts);
+  const deltaHours=baseSim?sim.hours-baseSim.hours:sim.hours,deltaMiles=baseSim?sim.miles-baseSim.miles:sim.miles;
+  if(opts.optTime)score+=Math.max(-20,deltaHours)*1200;else score+=Math.max(-20,deltaHours)*120;
+  if(opts.optMiles)score+=Math.max(-500,deltaMiles)*25;else score+=Math.max(-500,deltaMiles)*2;
+  return score;
+}
+function scenarioSequenceRoute(routeId,opts){
+  const route=routes.find(r=>r.id===routeId);if(!route)return;
+  const original=stops.filter(s=>s.routeId===routeId&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);
+  if(scenarioRouteIsProtectedLongHaul(route)){scenarioApplyRouteOrder(routeId,original);return;}
+  const customerList=original.filter(s=>!scenarioIsFixedRouteAnchor(s));if(customerList.length<2){scenarioApplyRouteOrder(routeId,scenarioComposePreservingDepots(routeId,scenarioOrderCustomersForSpecialRules(customerList)));return;}
+  // If neither route-sequence freedom nor an optimization objective was selected,
+  // preserve imported customer order (except B pickups, which always remain last).
+  if(!opts.removeSequenceLock&&!opts.optMiles&&!opts.optTime){scenarioApplyRouteOrder(routeId,scenarioComposePreservingDepots(routeId,scenarioOrderCustomersForSpecialRules(customerList)));return;}
+  const locked=opts.removeSequenceLock?[]:customerList.filter(s=>preferredPosition(s)>0&&!scenarioIsBackhaulStop(s));
+  const backhauls=customerList.filter(scenarioIsBackhaulStop),movable=customerList.filter(s=>!locked.includes(s)&&!scenarioIsBackhaulStop(s));
+  let cur=routeInitialDepot(route)||original.find(scenarioIsFixedRouteAnchor)||movable[0]||locked[0]||backhauls[0],ordered=[],cursor=Number.isFinite(route.scenarioDispatchEpoch)?route.scenarioDispatchEpoch:scenarioOriginalStart(route);
+  while(movable.length){let bestI=0,best=Infinity;
+    movable.forEach((s,i)=>{const leg=scenarioModelLegMiles(cur,s),travel=scenarioModelDriveMinutes(leg),w=scenarioStopWindow(s),arrival=cursor+travel,wait=Number.isFinite(w.early)&&arrival<w.early?w.early-arrival:0,late=Number.isFinite(w.late)?Math.max(0,arrival+wait-w.late):0,over=Math.max(0,wait-Math.max(0,parseFloat(opts.allowedWaitMinutes)||0));let score=late*2500000+wait*120+over*12000+(opts.optTime?travel*12:travel)+(opts.optMiles?leg*25:leg*2);if(score<best){best=score;bestI=i;}});
+    const next=movable.splice(bestI,1)[0],leg=scenarioModelLegMiles(cur,next);cursor+=scenarioModelDriveMinutes(leg);const w=scenarioStopWindow(next);if(Number.isFinite(w.early)&&cursor<w.early)cursor=w.early;cursor+=stopServiceMinutes(next);ordered.push(next);cur=next;
+  }
+  if(!opts.removeSequenceLock&&locked.length){locked.sort((a,b)=>preferredPosition(a)-preferredPosition(b));locked.forEach(s=>{const pos=Math.max(0,Math.min(ordered.length,preferredPosition(s)-1));ordered.splice(pos,0,s);});}
+  ordered.push(...backhauls.sort((a,b)=>a.seq-b.seq));
+  const composed=scenarioComposePreservingDepots(routeId,ordered),sim=scenarioEvaluateOrderedRoute(route,composed,Number.isFinite(route.scenarioDispatchEpoch)?route.scenarioDispatchEpoch:scenarioOriginalStart(route));
+  // Capacity and max runtime are hard. Wait is a strong objective, not a reason to
+  // throw freight away; this prevents the 5-minute lever from becoming a freight filter.
+  if(scenarioCapacityOk(route,ordered)&&scenarioRuntimeOk(sim,opts,true))scenarioApplyRouteOrder(routeId,composed);else scenarioApplyRouteOrder(routeId,original);
+}
+function scenarioOptimizeDispatch(route,opts={}){
+  if(scenarioRouteIsProtectedLongHaul(route))return null;
+  const original=scenarioOriginalStart(route);let best=null;
+  for(let offset=-720;offset<=720;offset+=5){const start=original+offset,sim=scenarioSimulateRoute(route,start);if(!scenarioRuntimeOk(sim,opts,true))continue;const score=sim.late*2500000+scenarioWaitPenalty(sim,opts)+sim.hours*10+Math.abs(offset)*.02;if(!best||score<best.score)best={score,start,sim};}
+  if(best){route.scenarioDispatchEpoch=best.start;const d=new Date(best.start*60000);route.earliestStartTime=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');route.latestStartTime=route.earliestStartTime;}return best;
+}
+function scenarioOriginalRouteId(stop){return stop?.scenarioNetworkOriginalRouteId||stop?.scenarioOriginalRouteId||stop?.routeId||null;}
+function scenarioMarkNetworkOrigins(){stops.forEach(s=>{if(s.routeId&&!s.scenarioNetworkOriginalRouteId)s.scenarioNetworkOriginalRouteId=s.routeId;});}
+function scenarioRouteHardStatus(route,opts,customerStops=null){
+  const customers=(customerStops||scenarioRouteCustomerStops(route.id)).filter(s=>!scenarioIsFixedRouteAnchor(s));
+  if(!customers.length)return {ok:true,capacityOk:true,runtimeOk:true,sim:scenarioEvaluateRouteCustomers(route,customers,opts).sim,capacity:scenarioCapacityStatus(route,customers),severity:0};
+  if(scenarioRouteIsProtectedLongHaul(route))return {ok:true,capacityOk:true,runtimeOk:true,sim:scenarioRouteRuntime(route),capacity:scenarioCapacityStatus(route,customers),severity:0};
+  const ev=scenarioEvaluateRouteCustomers(route,customers,opts),cap=ev.capacity;
+  // Unknown capacity is allowed only for the route's already-imported work; no new
+  // cross-route work may be added to an unknown-capacity route.
+  const capacityOk=!cap.known||cap.ok;const runtimeOk=scenarioRuntimeOk(ev.sim,opts,true);
+  let severity=0;if(cap.known&&!cap.ok)severity+=(cap.cubeOver/(cap.cap.cube||1)+cap.weightOver/(cap.cap.weight||1))*1000;
+  if(ev.sim.isLayover&&!scenarioLayoverRuntimeOk(ev.sim))severity+=(ev.sim.segmentHours||[]).reduce((a,h,i)=>a+Math.max(0,h-((i===(ev.sim.segmentHours||[]).length-1)?8:10))*100,0);
+  else if(!ev.sim.isBackhaulOnly&&opts.maxRouteHours>0)severity+=Math.max(0,ev.sim.hours-opts.maxRouteHours)*100;
+  return {ok:capacityOk&&runtimeOk,capacityOk,runtimeOk,sim:ev.sim,capacity:cap,severity,order:ev.order,customers};
+}
+function scenarioDetachToPool(stop,pool,reason){
+  if(!stop||scenarioIsFixedRouteAnchor(stop)||!stop.routeId)return false;const from=stop.routeId;stop.scenarioNetworkOriginalRouteId=stop.scenarioNetworkOriginalRouteId||from;stop.scenarioNetworkPoolReason=reason;stop.routeId=null;stop.seq=0;pool.push(stop);return true;
+}
+function scenarioChooseReliefStop(route,opts){
+  const customers=scenarioRouteCustomerStops(route.id).filter(s=>!scenarioIsFixedRouteAnchor(s));if(!customers.length)return null;
+  const before=scenarioRouteHardStatus(route,opts,customers);let best=null;
+  for(const stop of customers){
+    const remaining=customers.filter(s=>s.id!==stop.id),after=scenarioRouteHardStatus(route,opts,remaining),relief=before.severity-after.severity;if(relief<=1e-9)continue;
+    const moveable=scenarioStopCanChangeRoute(stop,opts)?0:1,shipped=scenarioStopShippedCases(stop),cases=tCases(stop);
+    // Prefer a stop that fixes more of the violation, can be moved elsewhere,
+    // and displaces less freight when two choices provide similar relief.
+    const score=after.severity*1e7+moveable*1e6+(shipped||cases)*10-relief*1000;
+    if(!best||score<best.score)best={stop,remaining,after,score};
+  }
+  return best||{stop:customers.slice().sort((a,b)=>scenarioStopShippedCases(a)-scenarioStopShippedCases(b))[0],remaining:customers.slice(1)};
+}
+function scenarioExtractHardOverflow(opts,stats){
+  const pool=[];let guard=0;
+  while(guard++<5000){
+    const bad=routes.map(r=>({r,status:scenarioRouteHardStatus(r,opts)})).filter(x=>scenarioRouteHasCustomerWork(x.r.id)&&!scenarioRouteIsProtectedLongHaul(x.r)&&!x.status.ok).sort((a,b)=>b.status.severity-a.status.severity);
+    if(!bad.length)break;const route=bad[0].r,choice=scenarioChooseReliefStop(route,opts);if(!choice||!choice.stop)break;
+    if(scenarioDetachToPool(choice.stop,pool,!bad[0].status.capacityOk?'Capacity overflow':(scenarioRouteIsLayover(route)?'Layover-day overflow':'Route runtime overflow'))){
+      scenarioApplyRouteOrder(route.id,scenarioComposePreservingDepots(route.id,scenarioOrderCustomersForSpecialRules(choice.remaining||scenarioRouteCustomerStops(route.id))));stats.extractedStops++;stats.extractedCases+=tCases(choice.stop);
+    }else break;
+  }
+  return pool;
+}
+function scenarioCanTargetRoute(stop,route,opts){
+  if(!stop||!route||scenarioIsFixedRouteAnchor(stop))return false;
+  const original=scenarioOriginalRouteId(stop);
+  if(scenarioRouteIsProtectedLongHaul(route)&&route.id!==original)return false;
+  if(route.id!==original&&!scenarioStopCanChangeRoute(stop,opts))return false;
+  if(!scenarioDepotCompatible(stop,route,opts))return false;
+  return true;
+}
+function scenarioBestNetworkPlacement(stop,opts,excludeRouteId=null){
+  let best=null;const original=scenarioOriginalRouteId(stop);
+  for(const route of routes){
+    if(route.id===excludeRouteId||!scenarioCanTargetRoute(stop,route,opts))continue;
+    const base=scenarioRouteCustomerStops(route.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+    const baseStatus=scenarioRouteHardStatus(route,opts,base),baseSim=baseStatus.sim;
+    // Do not add work to a route whose truck capacity is unknown, unless this is
+    // simply returning the stop to the route it originally came from.
+    const cap=scenarioCapacityStatus(route,[...base,stop]);if(!cap.known&&route.id!==original)continue;if(cap.known&&!cap.ok)continue;
+    for(let i=0;i<=base.length;i++){
+      const candidate=[...base];candidate.splice(i,0,stop);const ordered=scenarioOrderCustomersForSpecialRules(candidate);const ev=scenarioEvaluateRouteCustomers(route,ordered,opts);
+      if(ev.capacity.known&&!ev.capacity.ok)continue;if(!scenarioRuntimeOk(ev.sim,opts,true))continue;
+      const movedPenalty=route.id===original?0:250;const score=scenarioNetworkRouteScore(route,ev.sim,opts,baseSim)+movedPenalty;
+      if(!best||score<best.score)best={route,customers:ordered,order:ev.order,sim:ev.sim,score};
+    }
+  }
+  return best;
+}
+function scenarioCountNetworkPlacements(stop,opts){let n=0;for(const r of routes){if(scenarioCanTargetRoute(stop,r,opts)){const cap=scenarioCapacityStatus(r,[...scenarioRouteCustomerStops(r.id),stop]);if((cap.known&&cap.ok)||(!cap.known&&r.id===scenarioOriginalRouteId(stop)))n++;}}return n;}
+function scenarioPlacePoolFreightFirst(pool,opts,stats,excludeByStop={}){
+  const queue=[...(pool||[])];queue.sort((a,b)=>{const ca=scenarioCountNetworkPlacements(a,opts),cb=scenarioCountNetworkPlacements(b,opts);if(ca!==cb)return ca-cb;const la=scenarioStopHasRouteLock(a)?0:1,lb=scenarioStopHasRouteLock(b)?0:1;if(la!==lb)return la-lb;return scenarioStopShippedCases(b)-scenarioStopShippedCases(a);});
+  const unplaced=[];
+  for(const stop of queue){
+    const dest=scenarioBestNetworkPlacement(stop,opts,excludeByStop[stop.id]||null);
+    if(dest){stop.routeId=dest.route.id;scenarioApplyRouteOrder(dest.route.id,dest.order);stats.placedStops++;stats.placedCases+=tCases(stop);if(dest.route.id!==scenarioOriginalRouteId(stop))stats.movedStops++;continue;}
+    // Freight-retention rescue: allow a higher-value stop to replace one lower-
+    // value movable stop on a feasible route, then retry the displaced stop later.
+    let swapped=false;
+    for(const route of routes){if(!scenarioCanTargetRoute(stop,route,opts)||route.id===(excludeByStop[stop.id]||null))continue;const existing=scenarioRouteCustomerStops(route.id).filter(v=>scenarioStopCanChangeRoute(v,opts)&&scenarioStopShippedCases(v)<scenarioStopShippedCases(stop)).sort((a,b)=>scenarioStopShippedCases(a)-scenarioStopShippedCases(b));
+      for(const victim of existing){const base=scenarioRouteCustomerStops(route.id).filter(s=>s.id!==victim.id);const candidate=[...base,stop],ev=scenarioEvaluateRouteCustomers(route,scenarioOrderCustomersForSpecialRules(candidate),opts),cap=scenarioCapacityStatus(route,candidate);if((cap.known&&!cap.ok)||(!cap.known&&route.id!==scenarioOriginalRouteId(stop))||!scenarioRuntimeOk(ev.sim,opts,true))continue;
+        victim.scenarioNetworkOriginalRouteId=victim.scenarioNetworkOriginalRouteId||route.id;victim.routeId=null;victim.seq=0;stop.routeId=route.id;scenarioApplyRouteOrder(route.id,ev.order);unplaced.push(victim);stats.swaps++;stats.movedStops++;swapped=true;break;}
+      if(swapped)break;
+    }
+    if(!swapped)unplaced.push(stop);
+  }
+  // Retry any swap victims once after the network has changed.
+  const finalUnassigned=[];
+  for(const stop of unplaced){if(stop.routeId)continue;const dest=scenarioBestNetworkPlacement(stop,opts,excludeByStop[stop.id]||null);if(dest){stop.routeId=dest.route.id;scenarioApplyRouteOrder(dest.route.id,dest.order);stats.placedStops++;stats.placedCases+=tCases(stop);if(dest.route.id!==scenarioOriginalRouteId(stop))stats.movedStops++;}else finalUnassigned.push(stop);}
+  return finalUnassigned;
+}
+function scenarioConsolidateUnderMinimum(opts,stats){
+  if(!(opts.minRouteHours>0))return [];
+  const pool=[],exclude={};
+  const under=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteExemptFromNormalRuntime(r)&&scenarioRouteRuntime(r).hours+1e-6<opts.minRouteHours).sort((a,b)=>scenarioRouteRuntime(a).hours-scenarioRouteRuntime(b).hours);
+  for(const route of under){const cs=[...scenarioRouteCustomerStops(route.id)];if(!cs.length)continue;stats.retiredRoutes++;for(const s of cs){exclude[s.id]=route.id;scenarioDetachToPool(s,pool,'Under minimum route runtime');}scenarioApplyRouteOrder(route.id,scenarioComposePreservingDepots(route.id,[]));}
+  return {pool,exclude};
+}
+function scenarioFinalizeUnassigned(unplaced,stats,reason='No feasible capacity/runtime placement'){
+  for(const stop of (unplaced||[])){if(stop.routeId)continue;stop.scenarioRemovedReason=stop.scenarioNetworkPoolReason||reason;stats.unassignedStops++;stats.unassignedOrders+=scenarioStopOrderCount(stop);stats.unassignedCases+=tCases(stop);stats.unassignedShippedCases+=scenarioStopShippedCases(stop);}
+}
+function scenarioRunFreightFirstNetworkOptimizer(opts){
+  const stats={extractedStops:0,extractedCases:0,placedStops:0,placedCases:0,movedStops:0,swaps:0,retiredRoutes:0,unassignedStops:0,unassignedOrders:0,unassignedCases:0,unassignedShippedCases:0,calibration:null};
+  scenarioMarkNetworkOrigins();stats.calibration=scenarioBuildTravelCalibration();
+  // Preserve pure backhaul/long-haul routes exactly as imported. Normal delivery
+  // routes still force B pickup stops behind all delivery customers.
+  routes.forEach(r=>{if(!scenarioRouteIsProtectedLongHaul(r)){const cs=scenarioOrderCustomersForSpecialRules(scenarioRouteCustomerStops(r.id).sort((a,b)=>a.seq-b.seq));scenarioApplyRouteOrder(r.id,scenarioComposePreservingDepots(r.id,cs));}});
+  // Only sequence when the user requested a route-shape optimization. Feasibility
+  // repair itself does not unnecessarily rewrite every imported route.
+  if(opts.optMiles||opts.optTime)routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r))scenarioSequenceRoute(r.id,opts);});
+  if(opts.optDispatch)routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r))scenarioOptimizeDispatch(r,opts);});
+  // Pull hard violations into one overflow pool instead of throwing stops directly
+  // to Unassigned. Then solve that pool against every route, including empty routes.
+  let pool=scenarioExtractHardOverflow(opts,stats);let unplaced=scenarioPlacePoolFreightFirst(pool,opts,stats,{});
+  // A placement can change downstream runtime. Repeat the overflow/placement pass
+  // a few times before declaring anything unserviceable.
+  for(let pass=0;pass<3;pass++){const again=scenarioExtractHardOverflow(opts,stats);if(!again.length)break;unplaced.push(...scenarioPlacePoolFreightFirst(again,opts,stats,{}));}
+  // Enforce the optional route minimum last. An under-minimum route is retired;
+  // its freight gets a full network placement attempt before anything is dropped.
+  const minWork=scenarioConsolidateUnderMinimum(opts,stats);if(minWork?.pool?.length)unplaced.push(...scenarioPlacePoolFreightFirst(minWork.pool,opts,stats,minWork.exclude));
+  // Final route-level sequence/dispatch pass after assignments stabilize.
+  routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)){if(opts.optMiles||opts.optTime||opts.removeSequenceLock)scenarioSequenceRoute(r.id,opts);const cs=scenarioOrderCustomersForSpecialRules(scenarioRouteCustomerStops(r.id).sort((a,b)=>a.seq-b.seq));scenarioApplyRouteOrder(r.id,scenarioComposePreservingDepots(r.id,cs));}});
+  if(opts.optDispatch)routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r))scenarioOptimizeDispatch(r,opts);});
+  // One final hard-feasibility extraction/placement round after sequence + dispatch.
+  const finalPool=scenarioExtractHardOverflow(opts,stats);if(finalPool.length)unplaced.push(...scenarioPlacePoolFreightFirst(finalPool,opts,stats,{}));
+  // Deduplicate final unassigned objects and only count those still unassigned.
+  const uniq=[...new Map(unplaced.filter(s=>s&&!s.routeId).map(s=>[s.id,s])).values()];scenarioFinalizeUnassigned(uniq,stats);
+  return stats;
+}
+function scenarioValidateRouteRuntimeLimits(opts){
+  const violations=[];routes.forEach(route=>{if(!scenarioRouteHasCustomerWork(route.id)||scenarioRouteIsBackhaulOnly(route))return;const sim=scenarioRouteRuntime(route);if(scenarioRouteIsLayover(route)){if(!scenarioLayoverRuntimeOk(sim)){const parts=(sim.segmentHours||[]).map((h,i)=>`Day ${i+1} ${h.toFixed(2)}h / ${i===(sim.segmentHours||[]).length-1?'8.00':'10.00'}h`).join(', ');violations.push(`${routeDisplayName(route)} layover segments: ${parts}`);}return;}if(opts.maxRouteHours>0&&sim.hours>opts.maxRouteHours+1e-6)violations.push(`${routeDisplayName(route)} = ${sim.hours.toFixed(2)}h (max ${opts.maxRouteHours.toFixed(2)}h)`);if(opts.minRouteHours>0&&sim.hours+1e-6<opts.minRouteHours)violations.push(`${routeDisplayName(route)} = ${sim.hours.toFixed(2)}h (min ${opts.minRouteHours.toFixed(2)}h)`);});return violations;
+}
+function scenarioCountWaitViolations(opts){
+  const allowed=Math.max(0,parseFloat(opts?.allowedWaitMinutes)||0);let stopsOver=0,totalOver=0,maxWait=0;
+  routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)).forEach(r=>{const sim=scenarioRouteRuntime(r);(sim.stops||[]).forEach(d=>{if(d.layover)return;const w=parseFloat(d.wait)||0;maxWait=Math.max(maxWait,w);if(w>allowed+1e-6){stopsOver++;totalOver+=w-allowed;}});});return {stopsOver,totalOver,maxWait};
+}
+function runScenarioModel(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  const opts=scenarioReadOptions();if(opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();
+  stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+  const removed=scenarioApplyFilters(opts);
+  const network=scenarioRunFreightFirstNetworkOptimizer(opts);
+  const runtimeViolations=scenarioValidateRouteRuntimeLimits(opts),capacityViolations=scenarioValidateCapacityLimits(),waitReview=scenarioCountWaitViolations(opts);
+  removed.removedOrders+=network.unassignedOrders;removed.removedCases+=network.unassignedCases;
+  // Preserve the fields the existing report/export expects while exposing the
+  // new network optimizer detail for testing.
+  removed.runtime={movedStops:network.movedStops,unassignedStops:network.unassignedStops,unassignedOrders:network.unassignedOrders,unassignedCases:network.unassignedCases,retiredRoutes:network.retiredRoutes,maxRepairs:network.extractedStops,layoverRepairs:0};
+  removed.capacity={movedStops:0,unassignedStops:0,unassignedOrders:0,unassignedCases:0,repairs:0,unknownCapacityRoutes:routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioCapacityStatus(r).known&&!scenarioRouteIsProtectedLongHaul(r)).length};
+  removed.network=network;removed.runtimeViolations=runtimeViolations;removed.capacityViolations=capacityViolations;removed.waitReview=waitReview;
+  const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops)),modeled=scenarioComputeModelMetrics(opts);const originalExpense=(opts.costMile||opts.costHour)?original.miles*opts.costMile+original.hours*opts.costHour:null;if(originalExpense!==null)original.expense=originalExpense;
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'Freight-First Network v16',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),modeled:scenarioClone(modeled)};
+  scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+}
+
 function scenarioDelta(metric,original,modeled,lowerIsBetter=false){const a=parseFloat(original?.[metric])||0,b=parseFloat(modeled?.[metric])||0,d=b-a,pct=a?d/a*100:0;const good=lowerIsBetter?d<0:d>0,bad=lowerIsBetter?d>0:d<0;return {d,pct,cls:good?'scenario-delta-good':bad?'scenario-delta-bad':'scenario-delta-neutral'};}
 function scenarioFmt(n,dec=1){return (parseFloat(n)||0).toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});}
+function scenarioFormatCurrency(value){const n=parseFloat(value);return Number.isFinite(n)?n.toLocaleString(undefined,{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}):'$0.00';}
 function scenarioReportMetric(label,key,formatter,lowerBetter=false){const r=scenarioLastRun,o=r.original,m=r.modeled,d=scenarioDelta(key,o,m,lowerBetter);return `<div class="scenario-report-row"><div><strong>${escapeHtml(label)}</strong></div><div>${formatter(o[key])}</div><div>${formatter(m[key])}</div><div class="${d.cls}">${d.d>=0?'+':''}${formatter(d.d)}${Math.abs(d.pct)>0.01?` (${d.pct>=0?'+':''}${d.pct.toFixed(1)}%)`:''}</div></div>`;}
 function scenarioReportMetricNeutral(label,key,formatter){const r=scenarioLastRun,o=r.original,m=r.modeled;const a=parseFloat(o[key])||0,b=parseFloat(m[key])||0,d=b-a,pct=a?d/a*100:0;return `<div class="scenario-report-row"><div><strong>${escapeHtml(label)}</strong></div><div>${formatter(o[key])}</div><div>${formatter(m[key])}</div><div class="scenario-delta-neutral">${d>=0?'+':''}${formatter(d)}${Math.abs(pct)>0.01?` (${pct>=0?'+':''}${pct.toFixed(1)}%)`:''}</div></div>`;}
 function openScenarioAfterActionReport(){
-  if(!scenarioLastRun){if(!scenarioBaseline){showToast('No scenario baseline is available yet.');return;}showToast('Run Model first to create an After Action comparison.');return;}const r=scenarioLastRun,o=r.original,m=r.modeled;const expenseRows=(o.expense!==undefined&&o.expense!==null)?scenarioReportMetric('Estimated Delivery Expense','expense',v=>formatCurrency(v),true):'';
-  document.querySelector('#scenario-report-modal h2').textContent=r.mode==='lite'?'Scenario After Action Report — Lite ReOp':'Scenario After Action Report';const summary=document.getElementById('scenario-report-summary');summary.innerHTML=`<div class="scenario-kpi-grid"><div class="scenario-kpi"><div class="v">${scenarioFmt(o.cases,0)} → ${scenarioFmt(m.cases,0)}</div><div class="l">Cases Planned</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.shippedCases,0)} → ${scenarioFmt(m.shippedCases,0)}</div><div class="l">Shipped Cases</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.miles)} → ${scenarioFmt(m.miles)}</div><div class="l">Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.hours)} → ${scenarioFmt(m.hours)}</div><div class="l">Route Hours</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.onTimePct)}% → ${scenarioFmt(m.onTimePct)}%</div><div class="l">Planned On Time</div></div></div><div class="scenario-note"><strong>${r.mode==='lite'?'Lite ReOp':'Model'} actions:</strong> ${r.removed.removedOrders} order line(s) / ${scenarioFmt(r.removed.removedCases,0)} cases moved to Unassigned${r.removed.runtime?`; runtime balancing moved ${r.removed.runtime.movedStops} stop(s) between routes, made ${r.removed.runtime.layoverRepairs||0} layover-day repair(s), retired ${r.removed.runtime.retiredRoutes} under-minimum route(s), and sent ${r.removed.runtime.unassignedOrders} order line(s) / ${scenarioFmt(r.removed.runtime.unassignedCases,0)} cases to Unassigned because they could not be placed within the selected route-runtime rules`:''}${r.removed.capacity?`; truck-capacity balancing moved ${r.removed.capacity.movedStops} stop(s), made ${r.removed.capacity.repairs} repair(s), and sent ${r.removed.capacity.unassignedOrders} order line(s) / ${scenarioFmt(r.removed.capacity.unassignedCases,0)} cases to Unassigned when no capacity-safe route was available${r.removed.capacity.unknownCapacityRoutes?`; ${r.removed.capacity.unknownCapacityRoutes} active route(s) had no matched Truck Default capacity`:''}`:''}${r.mode==='lite'?`; existing route assignments and imported stop sequence were preserved; surviving stops were not moved between routes and routes were not condensed; routes left with zero customer stops remain present and are counted as Empty Routes; imported planned arrival/service times were retained for On-Time KPI calculation (rechecked only against any intentionally changed customer windows); optimization, dispatch optimization, and runtime balancing were not run`:''}. Route Lock ${r.options.removeRouteLock?'removed':'retained'}; Sequence Lock ${r.options.removeSequenceLock?'removed':'retained'}; Assigned Customer Depot ${r.options.keepAssignedDepot===false?'cross-depot moves allowed':'kept with original depot'}; Miles optimization ${r.options.optMiles?'on':'off'}; Time optimization ${r.options.optTime?'on':'off'}; Dispatch optimization ${r.options.optDispatch?'on':'off'}; Allowed Wait Time ${scenarioFmt(r.options.allowedWaitMinutes??5,0)} min/stop (zero wait still preferred); Route Run Time ${r.options.minRouteHours?`min ${scenarioFmt(r.options.minRouteHours,2)}h`:'no min'} / ${r.options.maxRouteHours?`max ${scenarioFmt(r.options.maxRouteHours,2)}h`:'no max'}. Depot LocationKeys beginning with D and layover hotel LocationKeys beginning with L were retained on their original route and fixed sequence. Layover routes ignore the normal Route Run Time Min/Max and use 10 active hours before each hotel / 8 active hours after the final hotel. Backhaul LocationKeys beginning with B are sequenced after delivery customers during Full Model optimization.</div>`;
-  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Shipped Cases','shippedCases',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('Routes Used','routesUsed',v=>scenarioFmt(v,0),true)}${scenarioReportMetricNeutral('Empty Routes','emptyRoutes',v=>scenarioFmt(v,0))}${scenarioReportMetric('Miles Ran','miles',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Hours Ran','hours',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',v=>scenarioFmt(v,1)+'%',false)}${scenarioReportMetric('Wait Time (HH:MM:SS)','waitMinutes',v=>scenarioFormatHMSFromMinutes(v),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">Original miles/hours come from imported TotalDistanceMile and TotalTime. Modeled miles use geolocation-based road-distance estimates (straight-line × 1.25); modeled time uses the selected vehicle travel factor, imported stop service time, expanded windows, and modeled wait. Route runtime limits are enforced by redistributing eligible work or moving work that cannot fit to Unassigned; they no longer cancel the model.${r.removed.runtimeViolations?.length?` <strong>Runtime review:</strong> ${escapeHtml(r.removed.runtimeViolations.join(' | '))}`:''}${r.removed.capacityViolations?.length?` <strong>Capacity review:</strong> ${escapeHtml(r.removed.capacityViolations.join(' | '))}`:''} Full Model moves are rejected if the matched truck would exceed cube or weight capacity. Shipped Cases use Route Summary TotalMeasure1Delivery when available and are proportionally attributed to imported customer work so work moved to Unassigned reduces modeled shipped cases. Full Model candidate solutions reject any customer stop whose modeled wait exceeds the Allowed Wait Time, while every minute of wait remains penalized to favor the lowest feasible wait. This is a planning what-if model, not a turn-by-turn commercial routing engine.</div>`;document.getElementById('scenario-report-modal').style.display='flex';
+  if(!scenarioLastRun){if(!scenarioBaseline){showToast('No scenario baseline is available yet.');return;}showToast('Run Model first to create an After Action comparison.');return;}const r=scenarioLastRun,o=r.original,m=r.modeled;const expenseRows=(o.expense!==undefined&&o.expense!==null)?scenarioReportMetric('Estimated Delivery Expense','expense',v=>scenarioFormatCurrency(v),true):'';
+  document.querySelector('#scenario-report-modal h2').textContent=r.mode==='lite'?'Scenario After Action Report — Lite ReOp':'Scenario After Action Report';const summary=document.getElementById('scenario-report-summary');summary.innerHTML=`<div class="scenario-kpi-grid"><div class="scenario-kpi"><div class="v">${scenarioFmt(o.cases,0)} → ${scenarioFmt(m.cases,0)}</div><div class="l">Cases Planned</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.shippedCases,0)} → ${scenarioFmt(m.shippedCases,0)}</div><div class="l">Shipped Cases</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.miles)} → ${scenarioFmt(m.miles)}</div><div class="l">Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.hours)} → ${scenarioFmt(m.hours)}</div><div class="l">Route Hours</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.onTimePct)}% → ${scenarioFmt(m.onTimePct)}%</div><div class="l">Planned On Time</div></div></div><div class="scenario-note"><strong>${r.mode==='lite'?'Lite ReOp':'Model'} actions:</strong>${r.removed.network?` Freight-First Network optimizer used; calibrated distance factor ${scenarioFmt(r.removed.network.calibration?.distanceFactor||1.25,2)}× and effective road speed ${scenarioFmt(r.removed.network.calibration?.effectiveMph||35,1)} mph from ${r.removed.network.calibration?.sampleRoutes||0} imported route sample(s); overflow pool extracted ${r.removed.network.extractedStops||0} stop(s), placed ${r.removed.network.placedStops||0}, moved ${r.removed.network.movedStops||0} between routes, completed ${r.removed.network.swaps||0} freight-retention swap(s), and left ${r.removed.network.unassignedStops||0} stop(s) unassigned after network-wide placement attempts. `:''} ${r.removed.removedOrders} order line(s) / ${scenarioFmt(r.removed.removedCases,0)} cases moved to Unassigned${r.removed.runtime?`; runtime balancing moved ${r.removed.runtime.movedStops} stop(s) between routes, made ${r.removed.runtime.layoverRepairs||0} layover-day repair(s), retired ${r.removed.runtime.retiredRoutes} under-minimum route(s), and sent ${r.removed.runtime.unassignedOrders} order line(s) / ${scenarioFmt(r.removed.runtime.unassignedCases,0)} cases to Unassigned because they could not be placed within the selected route-runtime rules`:''}${r.removed.capacity?`; truck-capacity balancing moved ${r.removed.capacity.movedStops} stop(s), made ${r.removed.capacity.repairs} repair(s), and sent ${r.removed.capacity.unassignedOrders} order line(s) / ${scenarioFmt(r.removed.capacity.unassignedCases,0)} cases to Unassigned when no capacity-safe route was available${r.removed.capacity.unknownCapacityRoutes?`; ${r.removed.capacity.unknownCapacityRoutes} active route(s) had no matched Truck Default capacity`:''}`:''}${r.mode==='lite'?`; existing route assignments and imported stop sequence were preserved; surviving stops were not moved between routes and routes were not condensed; routes left with zero customer stops remain present and are counted as Empty Routes; imported planned arrival/service times were retained for On-Time KPI calculation (rechecked only against any intentionally changed customer windows); optimization, dispatch optimization, and runtime balancing were not run`:''}. Route Lock ${r.options.removeRouteLock?'removed':'retained'}; Sequence Lock ${r.options.removeSequenceLock?'removed':'retained'}; Assigned Customer Depot ${r.options.keepAssignedDepot===false?'cross-depot moves allowed':'kept with original depot'}; Miles optimization ${r.options.optMiles?'on':'off'}; Time optimization ${r.options.optTime?'on':'off'}; Dispatch optimization ${r.options.optDispatch?'on':'off'}; Allowed Wait Time ${scenarioFmt(r.options.allowedWaitMinutes??5,0)} min/stop (zero wait still preferred); Route Run Time ${r.options.minRouteHours?`min ${scenarioFmt(r.options.minRouteHours,2)}h`:'no min'} / ${r.options.maxRouteHours?`max ${scenarioFmt(r.options.maxRouteHours,2)}h`:'no max'}. Depot LocationKeys beginning with D and layover hotel LocationKeys beginning with L were retained on their original route and fixed sequence. Layover routes ignore the normal Route Run Time Min/Max and use 10 active hours before each hotel / 8 active hours after the final hotel. Backhaul LocationKeys beginning with B are sequenced after delivery customers during Full Model optimization.</div>`;
+  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Shipped Cases','shippedCases',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('Routes Used','routesUsed',v=>scenarioFmt(v,0),true)}${scenarioReportMetricNeutral('Empty Routes','emptyRoutes',v=>scenarioFmt(v,0))}${scenarioReportMetric('Miles Ran','miles',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Hours Ran','hours',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',v=>scenarioFmt(v,1)+'%',false)}${scenarioReportMetric('Wait Time (HH:MM:SS)','waitMinutes',v=>scenarioFormatHMSFromMinutes(v),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">Original miles/hours come from imported TotalDistanceMile and TotalTime. Modeled miles use geolocation-based road-distance estimates (straight-line × 1.25); modeled time uses the selected vehicle travel factor, imported stop service time, expanded windows, and modeled wait. Route runtime limits are enforced by redistributing eligible work or moving work that cannot fit to Unassigned; they no longer cancel the model.${r.removed.runtimeViolations?.length?` <strong>Runtime review:</strong> ${escapeHtml(r.removed.runtimeViolations.join(' | '))}`:''}${r.removed.capacityViolations?.length?` <strong>Capacity review:</strong> ${escapeHtml(r.removed.capacityViolations.join(' | '))}`:''} Full Model moves are rejected if the matched truck would exceed cube or weight capacity. Shipped Cases use Route Summary TotalMeasure1Delivery when available and are proportionally attributed to imported customer work so work moved to Unassigned reduces modeled shipped cases. Full Model candidate solutions reject any customer stop whose modeled wait exceeds the Allowed Wait Time, while every minute of wait remains penalized to favor the lowest feasible wait. ${r.removed.waitReview?` <strong>Wait review:</strong> ${r.removed.waitReview.stopsOver||0} stop(s) remain above the ${scenarioFmt(r.options.allowedWaitMinutes??5,0)}-minute target; maximum modeled wait ${scenarioFmt(r.removed.waitReview.maxWait||0,1)} min.`:''} Pure backhaul-only long-haul routes are preserved and exempt from normal route runtime balancing. This is a planning what-if model, not a turn-by-turn commercial routing engine.</div>`;document.getElementById('scenario-report-modal').style.display='flex';
 }
 
 function scenarioReportExportValue(metric,value){
