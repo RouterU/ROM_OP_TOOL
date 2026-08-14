@@ -639,6 +639,17 @@ body{background:var(--bg0);color:var(--text1);}
       </div>
       <div style="font-size:9px;color:var(--text3);margin-top:6px;">No day selected = import all route days.</div>
     </div>
+    <div id="route-data-date-filter" style="display:none;margin:10px 0 8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);">
+      <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;">Route Start Date Filter <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(Import Route Data — uses RouteStart)</span></div>
+      <div id="route-data-date-values" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;font-size:10px;color:var(--text2);max-height:150px;overflow:auto;">
+        <span style="grid-column:1/-1;color:var(--text3);">Load a Route Detail file to see available RouteStart dates.</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:7px;">
+        <button type="button" class="btn" style="padding:2px 6px;font-size:9px;" onclick="toggleAllRouteDataDates(true)">Select All</button>
+        <button type="button" class="btn" style="padding:2px 6px;font-size:9px;" onclick="toggleAllRouteDataDates(false)">Clear</button>
+      </div>
+      <div style="font-size:9px;color:var(--text3);margin-top:6px;">Select one or multiple RouteStart dates. Leave all dates unchecked to import every date in the file.</div>
+    </div>
     <input type="file" id="file-in" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFileSelect(this)"/>
     <div id="imp-preview"></div>
     <div class="modal-actions">
@@ -3934,6 +3945,9 @@ function setImportMode(m){
   if(cutPanel)cutPanel.style.display=importMode==='stops'?'block':'none';
   const dayPanel=document.getElementById('route-day-filter');
   if(dayPanel)dayPanel.style.display=importMode==='all'?'block':'none';
+  const routeDataDatePanel=document.getElementById('route-data-date-filter');
+  if(routeDataDatePanel)routeDataDatePanel.style.display=importMode==='routedata'?'block':'none';
+  if(importMode==='routedata'&&pendingWB)populateRouteDataDateFilter(pendingWB);
   const exportInfo=document.getElementById('import-export-info');
   if(exportInfo)exportInfo.style.display=importMode==='routedata'?'none':'block';
 }
@@ -3954,6 +3968,58 @@ function getSelectedRouteDayCodes(){
 
 function clearRouteDayFilter(){
   document.querySelectorAll('.route-day-chk').forEach(cb=>cb.checked=false);
+}
+
+function routeDataDateKey(value){
+  if(value===null||value===undefined||value==='')return '';
+  if(value instanceof Date&&!isNaN(value)){
+    return value.getFullYear()+'-'+String(value.getMonth()+1).padStart(2,'0')+'-'+String(value.getDate()).padStart(2,'0');
+  }
+  if(typeof value==='number'&&isFinite(value)&&value>20000){
+    const excelEpoch=new Date(Date.UTC(1899,11,30));
+    const d=new Date(excelEpoch.getTime()+Math.floor(value)*86400000);
+    return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');
+  }
+  const str=(value??'').toString().trim();
+  if(!str)return '';
+  let m=str.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if(m)return m[1]+'-'+String(parseInt(m[2],10)).padStart(2,'0')+'-'+String(parseInt(m[3],10)).padStart(2,'0');
+  m=str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if(m)return m[3]+'-'+String(parseInt(m[1],10)).padStart(2,'0')+'-'+String(parseInt(m[2],10)).padStart(2,'0');
+  const d=new Date(str);
+  if(!isNaN(d))return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  return '';
+}
+function routeDataDateLabel(key){
+  const m=(key||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m?`${m[2]}/${m[3]}/${m[1]}`:key;
+}
+function getSelectedRouteDataDates(){
+  return new Set(Array.from(document.querySelectorAll('.route-data-date-chk:checked')).map(cb=>cb.value));
+}
+function toggleAllRouteDataDates(checked){
+  document.querySelectorAll('.route-data-date-chk').forEach(cb=>cb.checked=checked);
+}
+function populateRouteDataDateFilter(wb){
+  const host=document.getElementById('route-data-date-values');
+  if(!host)return;
+  if(!wb){
+    host.innerHTML='<span style="grid-column:1/-1;color:var(--text3);">Load a Route Detail file to see available RouteStart dates.</span>';
+    return;
+  }
+  const dates=new Set();
+  wb.SheetNames.forEach(name=>{
+    const ws=wb.Sheets[name];
+    const data=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+    const type=detectImportSheetType(name,data);
+    if(type!=='route data' && !(wb.SheetNames.length===1))return;
+    data.forEach(row=>{
+      const key=routeDataDateKey(gcLoose(row,['RouteStart','Route Start','Route Start Date']));
+      if(key)dates.add(key);
+    });
+  });
+  const sorted=[...dates].sort();
+  host.innerHTML=sorted.length?sorted.map(key=>`<label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" class="route-data-date-chk" value="${escapeHtml(key)}" style="accent-color:var(--accent);"> ${escapeHtml(routeDataDateLabel(key))}</label>`).join(''):'<span style="grid-column:1/-1;color:var(--warn);">No usable RouteStart dates were found in the selected file.</span>';
 }
 
 function routeMatchesSelectedDay(row){
@@ -4045,6 +4111,7 @@ function readFile(file){
     try{
       const wb=XLSX.read(e.target.result,{type:'array'});
       pendingWB=wb;
+      if(importMode==='routedata')populateRouteDataDateFilter(wb);
       let sheetInfo=wb.SheetNames.map(name=>{
         const data=XLSX.utils.sheet_to_json(wb.Sheets[name],{defval:''});
         return {name, rows:data.length, type:detectImportSheetType(name,data)||'not detected'};
@@ -4089,7 +4156,16 @@ function confirmImport(){
         return;
       }
       const routeRows=[]; routeDataSheets.forEach(x=>routeRows.push(...x.data));
-      const summary=importScenarioRouteData(routeRows);
+      const selectedRouteDates=getSelectedRouteDataDates();
+      const filteredRouteRows=selectedRouteDates.size
+        ? routeRows.filter(row=>selectedRouteDates.has(routeDataDateKey(gcLoose(row,['RouteStart','Route Start','Route Start Date']))))
+        : routeRows;
+      if(selectedRouteDates.size&&!filteredRouteRows.length){
+        showToast('No Route Detail rows matched the selected RouteStart date(s).');
+        if(btn){btn.disabled=false;btn.textContent=originalText||'Import Data';}
+        return;
+      }
+      const summary=importScenarioRouteData(filteredRouteRows);
       rc=summary.routes; sc=summary.stops; lc=summary.depots;
       scenarioBaseline=captureScenarioBaseline();
       scenarioLastRun=null;
@@ -4146,7 +4222,8 @@ function confirmImport(){
       if(orderImportSummary){
         showIncrementalOrderImportSummary(orderImportSummary);
       }else if(importMode==='routedata'){
-        showToast(`Imported route baseline: ${rc} routes, ${sc} consolidated customer stops, ${lc} depots. Scenario Levers are ready.`);
+        const selectedDateCount=getSelectedRouteDataDates().size;
+        showToast(`Imported route baseline: ${rc} routes, ${sc} consolidated customer stops, ${lc} depots${selectedDateCount?` across ${selectedDateCount} selected RouteStart date${selectedDateCount===1?'':'s'}`:''}. Scenario Levers are ready.`);
       }else{
         const skipText=skipped?`, ${skipped} skipped/not detected`:'';
         showToast(`Imported: ${rc} route rows, ${dc} truck rows, ${sc} stop rows, ${lc} depot rows${skipText}`);
