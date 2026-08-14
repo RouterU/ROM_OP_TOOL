@@ -365,6 +365,33 @@ body{background:var(--bg0);color:var(--text1);}
 .q-body::-webkit-scrollbar-thumb{background:var(--border2);}
 .splitter:hover,.splitter.dragging{background:var(--accent);}
 
+
+
+/* Scenario Analysis */
+.scenario-modal{width:980px;max-width:97vw;max-height:94vh;}
+.scenario-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+.scenario-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:11px;}
+.scenario-card h3{font-size:11px;color:var(--text1);margin:0 0 7px;font-weight:700;}
+.scenario-help{font-size:9px;color:var(--text3);line-height:1.4;margin-top:5px;}
+.scenario-check-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;max-height:150px;overflow:auto;padding:3px;}
+.scenario-check{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text2);cursor:pointer;}
+.scenario-check input{accent-color:var(--accent);}
+.scenario-toggle{display:flex;align-items:flex-start;gap:7px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;color:var(--text1);cursor:pointer;}
+.scenario-toggle:last-child{border-bottom:none;}
+.scenario-toggle input{margin-top:2px;accent-color:var(--accent);}
+.scenario-kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0;}
+.scenario-kpi{background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:9px;text-align:center;}
+.scenario-kpi .v{font-family:'DM Mono',monospace;font-size:15px;font-weight:700;color:var(--text1);}
+.scenario-kpi .l{font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-top:2px;}
+.scenario-report-table{border:1px solid var(--border);border-radius:10px;overflow:auto;background:var(--bg2);}
+.scenario-report-row{display:grid;grid-template-columns:230px 150px 150px 150px;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);align-items:center;font-size:11px;}
+.scenario-report-row.header{position:sticky;top:0;background:var(--bg3);font-size:9px;color:var(--text3);text-transform:uppercase;font-weight:800;z-index:2;}
+.scenario-report-row:last-child{border-bottom:none;}
+.scenario-delta-good{color:var(--success);font-weight:800;}
+.scenario-delta-bad{color:var(--danger);font-weight:800;}
+.scenario-delta-neutral{color:var(--text2);font-weight:700;}
+.scenario-note{background:rgba(207,69,32,.10);border:1px solid rgba(207,69,32,.35);border-radius:8px;padding:9px;font-size:10px;color:var(--text2);line-height:1.45;}
+
 </style>
 </head>
 <body>
@@ -402,6 +429,10 @@ body{background:var(--bg0);color:var(--text1);}
     <button class="btn" onclick="openImport()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
       Import
+    </button>
+    <button class="btn primary" onclick="openScenarioLevers()" title="Run what-if route scenarios and compare the modeled solution to the imported baseline">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/><circle cx="9" cy="6" r="2" fill="currentColor"/><circle cx="15" cy="12" r="2" fill="currentColor"/><circle cx="11" cy="18" r="2" fill="currentColor"/></svg>
+      Scenario Levers
     </button>
     <button class="btn" onclick="openAddStop()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
@@ -556,6 +587,7 @@ body{background:var(--bg0);color:var(--text1);}
     <div class="imp-tabs">
       <div class="imp-tab active" id="itab-all" onclick="setImportMode('all')">All Templates</div>
       <div class="imp-tab" id="itab-stops" onclick="setImportMode('stops')">Orders Only</div>
+      <div class="imp-tab" id="itab-routedata" onclick="setImportMode('routedata')">Import Route Data</div>
     </div>
     <div id="imp-drop" class="file-drop"
       onclick="document.getElementById('file-in').click()"
@@ -827,6 +859,67 @@ body{background:var(--bg0);color:var(--text1);}
 
 
 
+<!-- Scenario Levers Modal -->
+<div id="scenario-levers-modal" style="display:none" class="modal-overlay">
+  <div class="modal scenario-modal">
+    <h2>Scenario Levers</h2>
+    <div class="scenario-note">Each Run Model starts from the original imported Route Detail baseline, applies the selected levers, then builds a new modeled solution. Removed orders remain visible as unassigned work so the effect is transparent.</div>
+    <div class="scenario-grid" style="margin-top:10px;">
+      <div class="scenario-card">
+        <h3>Order Types — Ignore</h3>
+        <div id="scenario-ignore-values" class="scenario-check-grid"></div>
+        <div class="scenario-help">Select zero, one, or multiple values from the imported <strong>Ignore</strong> column. Matching order lines are removed from the modeled routes.</div>
+      </div>
+      <div class="scenario-card">
+        <h3>Minimum Case Count</h3>
+        <div class="field"><label>Minimum combined cases per Location / Delivery Day</label><input id="scenario-min-cases" type="number" min="0" step="1" placeholder="Example: 20"/></div>
+        <div class="scenario-help">Orders are combined by LocationKey and planned delivery day. If the remaining combined cases are below the entered minimum, those orders are moved to Unassigned.</div>
+      </div>
+      <div class="scenario-card">
+        <h3>Customer Windows</h3>
+        <div class="input-row" style="margin-bottom:0;">
+          <div class="field"><label>Open Window By — Open</label><input id="scenario-window-open" type="number" min="0" step="5" value="0" placeholder="Minutes"/></div>
+          <div class="field"><label>Open Window By — Close</label><input id="scenario-window-close" type="number" min="0" step="5" value="0" placeholder="Minutes"/></div>
+        </div>
+        <div class="scenario-help">Open moves the EarlyDateTime earlier by the entered minutes. Close moves the LateDateTime later.</div>
+      </div>
+      <div class="scenario-card">
+        <h3>Routing Locks</h3>
+        <label class="scenario-toggle"><input id="scenario-remove-route-lock" type="checkbox"/><span><strong>Remove Route Lock</strong><br/><span class="scenario-help">Clears PreferredResource for the modeled solution, allowing orders to move to another route.</span></span></label>
+        <label class="scenario-toggle"><input id="scenario-remove-sequence-lock" type="checkbox"/><span><strong>Remove Sequence Lock</strong><br/><span class="scenario-help">Clears Pref Rt Position for the modeled solution, allowing the optimizer to choose sequence freely.</span></span></label>
+      </div>
+      <div class="scenario-card">
+        <h3>Optimization</h3>
+        <label class="scenario-toggle"><input id="scenario-opt-miles" type="checkbox"/><span><strong>Optimize Miles</strong><br/><span class="scenario-help">Uses stop geolocations and marginal route distance to minimize modeled travel.</span></span></label>
+        <label class="scenario-toggle"><input id="scenario-opt-time" type="checkbox"/><span><strong>Optimize Time</strong><br/><span class="scenario-help">Minimizes drive + wait time while penalizing time-window misses.</span></span></label>
+        <label class="scenario-toggle"><input id="scenario-opt-dispatch" type="checkbox"/><span><strong>Optimize Dispatch Time</strong><br/><span class="scenario-help">Finds the best modeled route start time to reduce wait while meeting delivery windows.</span></span></label>
+      </div>
+      <div class="scenario-card">
+        <h3>Optional Delivery Expense Assumptions</h3>
+        <div class="input-row" style="margin-bottom:0;">
+          <div class="field"><label>Cost Per Mile</label><input id="scenario-cost-mile" type="number" min="0" step="0.01" placeholder="Optional"/></div>
+          <div class="field"><label>Cost Per Route Hour</label><input id="scenario-cost-hour" type="number" min="0" step="0.01" placeholder="Optional"/></div>
+        </div>
+        <div class="scenario-help">If supplied, the After Action Report also estimates delivery expense as miles × cost/mile + route hours × cost/hour. Blank fields do not create a dollar estimate.</div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('scenario-levers-modal')">Cancel</button>
+      <button class="btn primary" onclick="runScenarioModel()">Run Model</button>
+      <button class="btn success" onclick="openScenarioAfterActionReport()">After Action Report</button>
+    </div>
+  </div>
+</div>
+
+<!-- Scenario After Action Report Modal -->
+<div id="scenario-report-modal" style="display:none" class="modal-overlay">
+  <div class="modal scenario-modal">
+    <h2>Scenario After Action Report</h2>
+    <div id="scenario-report-summary"></div>
+    <div id="scenario-report-body"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal('scenario-report-modal')">Close</button></div>
+  </div>
+</div>
 
 
 <script>
@@ -865,6 +958,8 @@ let manualSequenceRouteId=null, manualSequenceOrder=[], manualSequenceDragStopId
 let lassoMode=false, lassoDragging=false, lassoStartPoint=null;
 let lassoSelectedStopIds=new Set();
 let currentOrderStatusFilter='ALL';
+let scenarioBaseline=null;
+let scenarioLastRun=null;
 const ORDER_STATUS_GLOSSARY={
   '00':'Incomplete Order - Order has no products entered yet.',
   '02':'Incomplete and Cancelled - Cancelled order without products.',
@@ -2027,7 +2122,7 @@ function openStopDetail(stopId){
     ${detailInput('ed-s-district','District',s.district)}
     ${detailInput('ed-s-willCallIndicator','Will Call',s.willCallIndicator)}
     ${detailTextArea('ed-s-comment','Comment',s.comment)}
-    ${renderStopOrdersHtml(s)}
+    ${s.sourceType==='route-data'?renderScenarioRouteDataDetailHtml(s):renderStopOrdersHtml(s)}
   </div>`;
   document.getElementById('stop-detail-modal').style.display='flex';
 }
@@ -3796,18 +3891,19 @@ function openImport(){
   if(importRouteDateEl) importRouteDateEl.value=document.getElementById('route-date')?.value||new Date().toISOString().slice(0,10);
   const importRegionCodeEl=document.getElementById('import-region-code');
   if(importRegionCodeEl) importRegionCodeEl.value=sessionRegionCode||importRegionCodeEl.value||'';
-  setImportMode(importMode==='stops'?'stops':'all');
+  setImportMode(['stops','routedata'].includes(importMode)?importMode:'all');
 }
 
 function setImportMode(m){
-  importMode=m==='stops'?'stops':'all';
-  ['all','stops'].forEach(x=>{
+  importMode=['stops','routedata'].includes(m)?m:'all';
+  ['all','stops','routedata'].forEach(x=>{
     const tab=document.getElementById('itab-'+x);
     if(tab)tab.className='imp-tab'+(importMode===x?' active':'');
   });
   const hints={
     all:'Upload one file with sheets named "Routes", "Trucks", "Orders", and "Depot Locations".',
-    stops:'Upload your Orders file. Select the CUTID(s) that are being added to the session.'
+    stops:'Upload your Orders file. Select the CUTID(s) that are being added to the session.',
+    routedata:'Upload the Route Detail Summary CSV/XLSX. RouteER will rebuild the imported route history using Resource Key, GeoStopNumber, customer geolocations, cases, windows, locks, service, drive, wait, and route totals.'
   };
   const hint=document.getElementById('imp-hint');
   if(hint)hint.textContent=hints[importMode];
@@ -3816,7 +3912,7 @@ function setImportMode(m){
   const dayPanel=document.getElementById('route-day-filter');
   if(dayPanel)dayPanel.style.display=importMode==='all'?'block':'none';
   const exportInfo=document.getElementById('import-export-info');
-  if(exportInfo)exportInfo.style.display='block';
+  if(exportInfo)exportInfo.style.display=importMode==='routedata'?'none':'block';
 }
 
 function toggleAllCutIds(checked){
@@ -3903,6 +3999,10 @@ function detectImportSheetType(name,data){
   );
 
 
+  const normalizedKeys=keys.map(normHeaderKey);
+  const looksRouteData=['resourcekey','geostopnumber','locationkey','plannedarriveddate','cases','earlydatetime','latedatetime'].every(k=>normalizedKeys.includes(k));
+  if(looksRouteData)return 'route data';
+
   // Strong sheet-name support for the provided master template.
   if(sheetLower.includes('depot')||sheetLower==='depot locations')return looksDepot?'depots':null;
   if(sheetLower.includes('route')&&!sheetLower.includes('stop'))return looksRoutes?'routes':null;
@@ -3926,6 +4026,7 @@ function readFile(file){
         const data=XLSX.utils.sheet_to_json(wb.Sheets[name],{defval:''});
         return {name, rows:data.length, type:detectImportSheetType(name,data)||'not detected'};
       });
+      if(importMode==='routedata')sheetInfo=sheetInfo.filter(s=>s.type==='route data').map(s=>({...s,type:'route detail history'}));
       document.getElementById('imp-preview').innerHTML=`
         <div style="margin-top:8px;font-size:11px;color:var(--text2);">
           &#10003; <strong>${file.name}</strong><br/>
@@ -3933,7 +4034,7 @@ function readFile(file){
             <span>${s.name} <span style="color:var(--text3);">(${s.rows} rows)</span></span>
             <strong style="color:${s.type==='not detected'?'var(--warn)':(s.type==='ignored'||s.type==='reference only'?'var(--text3)':'var(--success)')};">${s.type}</strong>
           </div>`).join('')}
-          <br/><span style="color:var(--text3);">${'All Templates mode imports detected route, truck, depot, and order tabs. Orders Only runs the incremental cut import/status refresh process.'}</span>
+          <br/><span style="color:var(--text3);">${importMode==='routedata'?'Import Route Data rebuilds the route history and captures an immutable baseline for Scenario Levers.':'All Templates mode imports detected route, truck, depot, and order tabs. Orders Only runs the incremental cut import/status refresh process.'}</span>
         </div>`;
       document.getElementById('imp-confirm').style.display='';
     }catch(err){showToast('Error reading file: '+err.message);}
@@ -3956,7 +4057,20 @@ function confirmImport(){
       const data=XLSX.utils.sheet_to_json(ws,{defval:'', raw:false});
       return {name,data,type:detectImportSheetType(name,data)};
     }).filter(x=>x.data.length);
-    if(importMode==='stops'){
+    if(importMode==='routedata'){
+      let routeDataSheets=sheets.filter(x=>x.type==='route data');
+      if(!routeDataSheets.length&&sheets.length===1)routeDataSheets=sheets;
+      if(!routeDataSheets.length){
+        showToast('No Route Detail Summary data was detected in the selected file.');
+        if(btn){btn.disabled=false;btn.textContent=originalText||'Import Data';}
+        return;
+      }
+      const routeRows=[]; routeDataSheets.forEach(x=>routeRows.push(...x.data));
+      const summary=importScenarioRouteData(routeRows);
+      rc=summary.routes; sc=summary.stops; lc=summary.depots;
+      scenarioBaseline=captureScenarioBaseline();
+      scenarioLastRun=null;
+    }else if(importMode==='stops'){
       const selectedCutIds=getSelectedCutIds();
       if(!selectedCutIds.length){
         showToast('Select at least one CUTID to add before importing Orders Only.');
@@ -4008,6 +4122,8 @@ function confirmImport(){
       renderRoutes();
       if(orderImportSummary){
         showIncrementalOrderImportSummary(orderImportSummary);
+      }else if(importMode==='routedata'){
+        showToast(`Imported route baseline: ${rc} routes, ${sc} consolidated customer stops, ${lc} depots. Scenario Levers are ready.`);
       }else{
         const skipText=skipped?`, ${skipped} skipped/not detected`:'';
         showToast(`Imported: ${rc} route rows, ${dc} truck rows, ${sc} stop rows, ${lc} depot rows${skipText}`);
@@ -4907,6 +5023,8 @@ function buildWorkSessionPayload(){
       depotLocations:cleanSessionObjectForSave(depotLocations),
       cancelledOrders:cleanSessionObjectForSave(cancelledOrders),
       sessionRegionCode,
+      scenarioBaseline:cleanSessionObjectForSave(scenarioBaseline),
+      scenarioLastRun:cleanSessionObjectForSave(scenarioLastRun),
       potColors:cleanSessionObjectForSave(potColors),
       potRouteSuggestions:cleanSessionObjectForSave(potRouteSuggestions)
     },
@@ -4977,6 +5095,8 @@ function restoreWorkSessionPayload(payload){
   depotLocations=Array.isArray(payload.data.depotLocations)?payload.data.depotLocations:[];
   cancelledOrders=Array.isArray(payload.data.cancelledOrders)?payload.data.cancelledOrders:[];
   sessionRegionCode=payload.data.sessionRegionCode||'';
+  scenarioBaseline=payload.data.scenarioBaseline||null;
+  scenarioLastRun=payload.data.scenarioLastRun||null;
   potColors=payload.data.potColors||{};
   potRouteSuggestions=payload.data.potRouteSuggestions||{};
 
@@ -5052,6 +5172,8 @@ function clearSession(){
   depotLocations = [];
   cancelledOrders = [];
   sessionRegionCode = '';
+  scenarioBaseline = null;
+  scenarioLastRun = null;
 
   mapCleared = true;
 
@@ -5459,6 +5581,183 @@ function esriAerialImageUrl(lat,lng){
 
 
 
+
+// ============================================================
+// ROUTE DATA + SCENARIO ANALYSIS
+// ============================================================
+function scenarioCleanFormula(value){
+  const s=sval(value).replace(/^=/,'').replace(/^"|"$/g,'').trim();
+  const n=parseFloat(s.replace(/,/g,''));
+  return Number.isFinite(n)?n:0;
+}
+function scenarioDurationSeconds(value){
+  if(value===null||value===undefined||value==='')return 0;
+  if(typeof value==='number'&&Number.isFinite(value))return value<2?Math.round(value*86400):Math.round(value);
+  const s=sval(value).replace(/^=/,'').replace(/^"|"$/g,'').trim();
+  const parts=s.match(/^(\d+):(\d{1,2}):(\d{1,2})$/);
+  if(parts)return parseInt(parts[1],10)*3600+parseInt(parts[2],10)*60+parseInt(parts[3],10);
+  const n=parseFloat(s);
+  return Number.isFinite(n)?n:0;
+}
+function scenarioParseDate(value){
+  if(value===null||value===undefined||value==='')return null;
+  const s=sval(value).replace(/^=/,'').replace(/^"|"$/g,'').trim();
+  if(!s)return null;
+  let d=new Date(s);
+  if(!isNaN(d))return d;
+  const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$/i);
+  if(!m)return null;
+  let h=parseInt(m[4]||'0',10), min=parseInt(m[5]||'0',10), sec=parseInt(m[6]||'0',10); const ap=(m[7]||'').toUpperCase();
+  if(ap==='PM'&&h<12)h+=12; if(ap==='AM'&&h===12)h=0;
+  d=new Date(parseInt(m[3],10),parseInt(m[1],10)-1,parseInt(m[2],10),h,min,sec,0);
+  return isNaN(d)?null:d;
+}
+function scenarioEpochMinutes(value){const d=scenarioParseDate(value);return d?d.getTime()/60000:null;}
+function scenarioIsoDate(value){const d=scenarioParseDate(value);if(!d)return '';return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function scenarioTime(value){const d=scenarioParseDate(value);if(!d)return cleanTimeValue(value);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+function scenarioFormatDuration(seconds){return fmtMinutes((parseFloat(seconds)||0)/60);}
+function scenarioRouteDataDepot(row,suffix){
+  const lat=parseFloat(gcLoose(row,['GeocodeLatitude','Latitude'])); const lng=parseFloat(gcLoose(row,['GeocodeLongitude','Longitude']));
+  const key=sval(gcLoose(row,['LocationKey']))||('ROUTE_DATA_DEPOT_'+suffix);
+  return {id:uid(),locationKey:key,name:sval(gcLoose(row,['Customer','Company']))||key,locationType:'DEPOT',branchDivision:'',market:'',comment:'Imported from Route Detail Summary',shipStreet:sval(gcLoose(row,['Street Name','ShipStreetName','Ship Street Name'])),shipCity:sval(gcLoose(row,['City','ShipCity'])),shipState:sval(gcLoose(row,['State','ShipState'])),shipZipCode:sval(gcLoose(row,['Zipcode','ShipZipcode','ShipZipCode'])),lat:Number.isFinite(lat)?lat:null,lng:Number.isFinite(lng)?lng:null,raw:{...row}};
+}
+function scenarioUpsertDepot(row,suffix){
+  const d=scenarioRouteDataDepot(row,suffix); let existing=depotLocations.find(x=>normalizeKey(x.locationKey)===normalizeKey(d.locationKey));
+  if(existing){Object.assign(existing,d,{id:existing.id});return existing;} depotLocations.push(d); return d;
+}
+function scenarioCustomerRow(row){
+  return sval(gcLoose(row,['Cases']))!=='' || sval(gcLoose(row,['EarlyDateTime']))!=='' || sval(gcLoose(row,['LateDateTime']))!=='' || sval(gcLoose(row,['PreferredResource']))!=='' || sval(gcLoose(row,['Ignore']))!=='';
+}
+function scenarioOrderFromRow(row){
+  return {orderNumber:sval(gcLoose(row,['OrderKey']))||uid(),locationKey:sval(gcLoose(row,['LocationKey'])),customerName:sval(gcLoose(row,['Customer','Company'])),cases:scenarioCleanFormula(gcLoose(row,['Cases'])),ignoreType:sval(gcLoose(row,['Ignore'])),preferredResourceKey:sval(gcLoose(row,['PreferredResource'])),preferredRouteSequence:sval(gcLoose(row,['Pref Rt Position'])),earliestRaw:sval(gcLoose(row,['EarlyDateTime'])),latestRaw:sval(gcLoose(row,['LateDateTime'])),plannedArrivedRaw:sval(gcLoose(row,['Planned Arrived Date'])),plannedBegunRaw:sval(gcLoose(row,['Planned Begun Date'])),plannedCompletedRaw:sval(gcLoose(row,['Planned Completed Date'])),plannedDepartedRaw:sval(gcLoose(row,['Planned Departed Date'])),stopServiceSeconds:scenarioDurationSeconds(gcLoose(row,['StopServiceTime'])),waitSeconds:scenarioDurationSeconds(gcLoose(row,['WaitTime'])),distanceMile:scenarioCleanFormula(gcLoose(row,['DistanceMile'])),driveSeconds:scenarioDurationSeconds(gcLoose(row,['DriveTime'])),raw:{...row}};
+}
+function scenarioRecalcStop(stop){
+  const os=Array.isArray(stop.orders)?stop.orders:[];
+  stop.dryCases=os.reduce((a,o)=>a+(parseFloat(o.cases)||0),0); stop.coolerCases=0;stop.frozenCases=0;stop.pkgCases=0;
+  stop.fixedServiceTime=Math.max(0,...os.map(o=>parseFloat(o.stopServiceSeconds)||0),parseFloat(stop.routeData?.stopServiceSeconds)||0);
+  const first=os[0]||{}; stop.preferredResourceKey=first.preferredResourceKey||''; stop.preferredRouteSequence=first.preferredRouteSequence||'';
+  stop.earliestTimeWindow=scenarioTime(first.earliestRaw||stop.earliestTimeWindowRaw); stop.latestTimeWindow=scenarioTime(first.latestRaw||stop.latestTimeWindowRaw);
+  return stop;
+}
+function importScenarioRouteData(data){
+  routes=routes.filter(r=>r.sourceType!=='route-data'); stops=stops.filter(s=>s.sourceType!=='route-data'); depotLocations=depotLocations.filter(d=>d.comment!=='Imported from Route Detail Summary');
+  const valid=(data||[]).filter(r=>sval(gcLoose(r,['Resource Key','ResourceKey'])));
+  const byRoute=new Map(); valid.forEach(row=>{const key=sval(gcLoose(row,['Resource Key','ResourceKey']));if(!byRoute.has(key))byRoute.set(key,[]);byRoute.get(key).push(row);});
+  let routeCount=0,stopCount=0;
+  byRoute.forEach((rows,resourceKey)=>{
+    const sorted=[...rows].sort((a,b)=>scenarioCleanFormula(gcLoose(a,['GeoStopNumber']))-scenarioCleanFormula(gcLoose(b,['GeoStopNumber']))||scenarioCleanFormula(gcLoose(a,['Stop Number']))-scenarioCleanFormula(gcLoose(b,['Stop Number'])));
+    const depotRows=sorted.filter(r=>!scenarioCustomerRow(r)); const first=depotRows[0]||sorted[0], last=depotRows[depotRows.length-1]||sorted[sorted.length-1];
+    const init=scenarioUpsertDepot(first,resourceKey+'_START'), fin=scenarioUpsertDepot(last,resourceKey+'_END');
+    const routeStart=sval(gcLoose(first,['RouteStart'])), routeEnd=sval(gcLoose(first,['RouteEnd']));
+    const route={id:uid(),sourceType:'route-data',importIdentity:'ROUTEDATA|'+resourceKey,name:resourceKey,routeTemplateKey:resourceKey,date:scenarioIsoDate(routeStart)||scenarioIsoDate(gcLoose(first,['Planned Arrived Date'])),scheduleKey:'',udfNumber1:first4Digits(resourceKey),udfString2:sval(gcLoose(first,['UDFString2'])),initialLocationKey:init?.locationKey||'',finalLocationKey:fin?.locationKey||'',earliestStartTime:scenarioTime(routeStart),latestStartTime:scenarioTime(routeStart),latestEndTime:scenarioTime(routeEnd),startupTime:0,windupTime:0,driverKey:sval(gcLoose(first,['Driver Key','DriverKey'])),truckKey:sval(gcLoose(first,['TruckKey','Truck Key'])),trailerKey:sval(gcLoose(first,['Trailer Key','TrailerKey'])),requirements:sval(gcLoose(first,['Requirements'])),work1Duration:'',routingParameterKey:'',selected:false,dummyCapacity:{totalCube:scenarioCleanFormula(gcLoose(first,['Cube Max Capacity'])),weight:scenarioCleanFormula(gcLoose(first,['Weight Max Capacity']))},routeData:{resourceKey,routeStart,routeEnd,totalDistanceMile:scenarioCleanFormula(gcLoose(first,['TotalDistanceMile'])),totalTimeSeconds:scenarioDurationSeconds(gcLoose(first,['TotalTime'])),startServiceSeconds:scenarioDurationSeconds(gcLoose(first,['StopServiceTime'])),rawRows:rows.map(r=>({...r}))}};
+    routes.push(route); routeCount++;
+    const customers=rows.filter(scenarioCustomerRow); const grouped=new Map();
+    customers.forEach(row=>{const loc=sval(gcLoose(row,['LocationKey']))||sval(gcLoose(row,['Customer']));const k=loc.toUpperCase();if(!grouped.has(k))grouped.set(k,[]);grouped.get(k).push(row);});
+    grouped.forEach(group=>{
+      group.sort((a,b)=>scenarioCleanFormula(gcLoose(a,['GeoStopNumber']))-scenarioCleanFormula(gcLoose(b,['GeoStopNumber']))); const base=group[0]; const orders=group.map(scenarioOrderFromRow);
+      const lat=parseFloat(gcLoose(base,['GeocodeLatitude','Latitude'])), lng=parseFloat(gcLoose(base,['GeocodeLongitude','Longitude'])); const seq=Math.min(...group.map(r=>scenarioCleanFormula(gcLoose(r,['GeoStopNumber']))).filter(n=>Number.isFinite(n)&&n>0));
+      const service=Math.max(0,...group.map(r=>scenarioDurationSeconds(gcLoose(r,['StopServiceTime'])))); const wait=group.reduce((a,r)=>a+scenarioDurationSeconds(gcLoose(r,['WaitTime'])),0);
+      const early=orders.map(o=>o.earliestRaw).filter(Boolean).sort()[0]||'', late=orders.map(o=>o.latestRaw).filter(Boolean).sort().slice(-1)[0]||'';
+      const stop={id:uid(),sourceType:'route-data',routeId:route.id,seq:Number.isFinite(seq)?seq:1,orderNumber:orders.map(o=>o.orderNumber).filter(Boolean).join(', '),orderNumbers:orders.map(o=>o.orderNumber).filter(Boolean),customerName:sval(gcLoose(base,['Customer']))||sval(gcLoose(base,['LocationKey']))||'Route Stop',shipToId:sval(gcLoose(base,['LocationKey'])),customerNumber:sval(gcLoose(base,['LocationKey'])),address:sval(gcLoose(base,['Street Name'])),city:sval(gcLoose(base,['City'])),state:sval(gcLoose(base,['State'])),zip:sval(gcLoose(base,['Zipcode'])),country:'US',lat:Number.isFinite(lat)?lat:null,lng:Number.isFinite(lng)?lng:null,dryCases:orders.reduce((a,o)=>a+o.cases,0),dryCube:0,dryWeight:0,coolerCases:0,coolerCube:0,coolerWeight:0,frozenCases:0,frozenCube:0,frozenWeight:0,pkgCases:0,pkgCube:0,pkgWeight:0,fixedServiceTime:service,variableServiceTime:0,earliestTimeWindow:scenarioTime(early),latestTimeWindow:scenarioTime(late),earliestTimeWindowRaw:early,latestTimeWindowRaw:late,preferredResourceKey:sval(gcLoose(base,['PreferredResource'])),preferredRouteSequence:sval(gcLoose(base,['Pref Rt Position'])),orderType:sval(gcLoose(base,['Ignore']))||'Imported Route Data',orderStatus:'',district:'',willCallIndicator:'',comment:sval(gcLoose(base,['ViolationDescription'])),orders,routeData:{resourceKey,geoSequences:group.map(r=>scenarioCleanFormula(gcLoose(r,['GeoStopNumber']))),plannedArrived:sval(gcLoose(base,['Planned Arrived Date'])),plannedBegun:sval(gcLoose(base,['Planned Begun Date'])),plannedCompleted:sval(gcLoose(base,['Planned Completed Date'])),stopServiceSeconds:service,waitSeconds:wait,distanceMile:group.reduce((a,r)=>a+scenarioCleanFormula(gcLoose(r,['DistanceMile'])),0),driveSeconds:group.reduce((a,r)=>a+scenarioDurationSeconds(gcLoose(r,['DriveTime'])),0),ignoreValues:[...new Set(orders.map(o=>o.ignoreType).filter(Boolean))],rawRows:group.map(r=>({...r}))},raw:{...base},lockStart:false,lockFinal:false};
+      stops.push(stop); stopCount++;
+    });
+  });
+  enrichRouteDepots(); reseq(); return {routes:routeCount,stops:stopCount,depots:new Set(depotLocations.filter(d=>d.comment==='Imported from Route Detail Summary').map(d=>d.locationKey)).size,rows:valid.length};
+}
+function renderScenarioRouteDataDetailHtml(stop){
+  const rd=stop.routeData||{}, rawRows=Array.isArray(rd.rawRows)?rd.rawRows:[], cols=rawRows.length?Object.keys(rawRows[0]):[];
+  return `<details class="order-expand" open><summary>Imported Route Data <span class="order-badge">${rawRows.length}</span></summary><div style="padding:8px 10px;color:var(--text2);font-size:10px;line-height:1.5;"><strong>Ignore:</strong> ${escapeHtml((rd.ignoreValues||[]).join(', ')||'—')} &nbsp; · &nbsp; <strong>PreferredResource:</strong> ${escapeHtml(stop.preferredResourceKey||'—')} &nbsp; · &nbsp; <strong>Pref Rt Position:</strong> ${escapeHtml(stop.preferredRouteSequence||'—')}<br/><strong>Imported Wait:</strong> ${scenarioFormatDuration(rd.waitSeconds||0)} &nbsp; · &nbsp; <strong>Imported Leg Miles:</strong> ${(rd.distanceMile||0).toFixed(2)}</div><div class="order-table" style="overflow:auto;max-height:300px;"><div style="display:grid;grid-template-columns:repeat(${Math.max(cols.length,1)},minmax(130px,1fr));min-width:${Math.max(cols.length*140,600)}px;">${cols.map(c=>`<div style="position:sticky;top:0;background:var(--bg2);padding:6px;border:1px solid var(--border);font-size:9px;color:var(--text3);font-weight:800;">${escapeHtml(c)}</div>`).join('')}${rawRows.map(row=>cols.map(c=>`<div style="padding:6px;border:1px solid var(--border);font-size:10px;">${escapeHtml(row[c]??'')}</div>`).join('')).join('')}</div></div></details>`;
+}
+function scenarioClone(value){return JSON.parse(JSON.stringify(value));}
+function captureScenarioBaseline(){
+  const snapshot={routes:scenarioClone(routes),stops:scenarioClone(stops),depots:scenarioClone(depotLocations),capturedAt:new Date().toISOString()}; snapshot.metrics=scenarioComputeBaselineMetrics(snapshot.routes,snapshot.stops); return snapshot;
+}
+function restoreScenarioBaseline(){
+  if(!scenarioBaseline)return false; routes=scenarioClone(scenarioBaseline.routes); stops=scenarioClone(scenarioBaseline.stops); depotLocations=scenarioClone(scenarioBaseline.depots); enrichRouteDepots(); reseq(); return true;
+}
+function scenarioIgnoreValues(){
+  const source=scenarioBaseline?.stops||stops; const vals=[]; source.forEach(s=>(s.orders||[]).forEach(o=>{if(sval(o.ignoreType))vals.push(sval(o.ignoreType));})); return [...new Set(vals)].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+}
+function openScenarioLevers(){
+  if(!scenarioBaseline&&routes.some(r=>r.sourceType==='route-data'))scenarioBaseline=captureScenarioBaseline();
+  if(!scenarioBaseline){showToast('Import a Route Detail Summary with Import Route Data first.');return;}
+  const box=document.getElementById('scenario-ignore-values'); const prior=new Set(Array.from(document.querySelectorAll('.scenario-ignore-chk:checked')).map(x=>x.value));
+  box.innerHTML=scenarioIgnoreValues().map(v=>`<label class="scenario-check"><input class="scenario-ignore-chk" type="checkbox" value="${escapeHtml(v)}" ${prior.has(v)?'checked':''}/> ${escapeHtml(v)}</label>`).join('')||'<span style="font-size:10px;color:var(--text3);">No Ignore values found.</span>';
+  document.getElementById('scenario-levers-modal').style.display='flex';
+}
+function scenarioReadOptions(){
+  return {ignoreValues:new Set(Array.from(document.querySelectorAll('.scenario-ignore-chk:checked')).map(x=>x.value)),minCases:Math.max(0,parseFloat(document.getElementById('scenario-min-cases')?.value)||0),windowOpen:Math.max(0,parseFloat(document.getElementById('scenario-window-open')?.value)||0),windowClose:Math.max(0,parseFloat(document.getElementById('scenario-window-close')?.value)||0),removeRouteLock:document.getElementById('scenario-remove-route-lock')?.checked===true,removeSequenceLock:document.getElementById('scenario-remove-sequence-lock')?.checked===true,optMiles:document.getElementById('scenario-opt-miles')?.checked===true,optTime:document.getElementById('scenario-opt-time')?.checked===true,optDispatch:document.getElementById('scenario-opt-dispatch')?.checked===true,costMile:Math.max(0,parseFloat(document.getElementById('scenario-cost-mile')?.value)||0),costHour:Math.max(0,parseFloat(document.getElementById('scenario-cost-hour')?.value)||0)};
+}
+function scenarioOrderDay(order,stop){return scenarioIsoDate(order?.plannedArrivedRaw)||scenarioIsoDate(order?.earliestRaw)||scenarioIsoDate(stop?.routeData?.plannedArrived)||routes.find(r=>r.id===stop?.routeId)?.date||'';}
+function scenarioSplitStopOrders(stop,predicate,reason){
+  const all=Array.isArray(stop.orders)?stop.orders:[]; if(!all.length)return {removedOrders:0,removedCases:0,newStop:null}; const removed=all.filter(predicate), kept=all.filter(o=>!predicate(o)); if(!removed.length)return {removedOrders:0,removedCases:0,newStop:null};
+  const removedCases=removed.reduce((a,o)=>a+(parseFloat(o.cases)||0),0); let newStop=null;
+  if(!kept.length){stop.routeId=null;stop.seq=0;stop.scenarioRemovedReason=reason;stop.orders=removed;scenarioRecalcStop(stop);}else{stop.orders=kept;scenarioRecalcStop(stop);newStop=scenarioClone(stop);newStop.id=uid();newStop.routeId=null;newStop.seq=0;newStop.orders=removed;newStop.scenarioRemovedReason=reason;newStop.orderNumber=removed.map(o=>o.orderNumber).join(', ');newStop.orderNumbers=removed.map(o=>o.orderNumber);scenarioRecalcStop(newStop);}
+  return {removedOrders:removed.length,removedCases,newStop};
+}
+function scenarioApplyFilters(opts){
+  let removedOrders=0,removedCases=0; const additions=[];
+  if(opts.ignoreValues.size){[...stops].filter(s=>s.sourceType==='route-data'&&s.routeId).forEach(s=>{const res=scenarioSplitStopOrders(s,o=>opts.ignoreValues.has(sval(o.ignoreType)),'Ignore: '+[...opts.ignoreValues].join(', '));removedOrders+=res.removedOrders;removedCases+=res.removedCases;if(res.newStop)additions.push(res.newStop);});}
+  stops.push(...additions); additions.length=0;
+  if(opts.minCases>0){const totals=new Map(); stops.filter(s=>s.sourceType==='route-data'&&s.routeId).forEach(s=>(s.orders||[]).forEach(o=>{const k=(sval(o.locationKey)||s.shipToId)+'|'+scenarioOrderDay(o,s);totals.set(k,(totals.get(k)||0)+(parseFloat(o.cases)||0));}));
+    [...stops].filter(s=>s.sourceType==='route-data'&&s.routeId).forEach(s=>{const res=scenarioSplitStopOrders(s,o=>{const k=(sval(o.locationKey)||s.shipToId)+'|'+scenarioOrderDay(o,s);return (totals.get(k)||0)<opts.minCases;},'Below '+opts.minCases+' combined cases');removedOrders+=res.removedOrders;removedCases+=res.removedCases;if(res.newStop)additions.push(res.newStop);}); stops.push(...additions);
+  }
+  stops.filter(s=>s.sourceType==='route-data').forEach(s=>{if(opts.removeRouteLock){s.preferredResourceKey='';(s.orders||[]).forEach(o=>o.preferredResourceKey='');}if(opts.removeSequenceLock){s.preferredRouteSequence='';(s.orders||[]).forEach(o=>o.preferredRouteSequence='');}
+    if(opts.windowOpen||opts.windowClose){(s.orders||[]).forEach(o=>{const e=scenarioParseDate(o.earliestRaw),l=scenarioParseDate(o.latestRaw);if(e){e.setMinutes(e.getMinutes()-opts.windowOpen);o.earliestRaw=e.toISOString();}if(l){l.setMinutes(l.getMinutes()+opts.windowClose);o.latestRaw=l.toISOString();}});const es=(s.orders||[]).map(o=>scenarioEpochMinutes(o.earliestRaw)).filter(Number.isFinite),ls=(s.orders||[]).map(o=>scenarioEpochMinutes(o.latestRaw)).filter(Number.isFinite);if(es.length){const d=new Date(Math.min(...es)*60000);s.earliestTimeWindowRaw=d.toISOString();s.earliestTimeWindow=scenarioTime(d.toISOString());}if(ls.length){const d=new Date(Math.max(...ls)*60000);s.latestTimeWindowRaw=d.toISOString();s.latestTimeWindow=scenarioTime(d.toISOString());}}
+  });
+  reseq(); return {removedOrders,removedCases};
+}
+function scenarioRouteTravelMiles(route,orderedStops){
+  const pts=[];const init=routeInitialDepot(route),fin=routeFinalDepot(route);if(init&&init.lat&&init.lng)pts.push(init);(orderedStops||[]).filter(s=>s.lat&&s.lng).forEach(s=>pts.push(s));if(fin&&fin.lat&&fin.lng)pts.push(fin);let miles=0;for(let i=1;i<pts.length;i++)miles+=roadAdjustedMiles(haversine(pts[i-1].lat,pts[i-1].lng,pts[i].lat,pts[i].lng));return miles;
+}
+function scenarioInsertionDelta(route,routeStops,stop,index){
+  const arr=[...routeStops];arr.splice(index,0,stop);return scenarioRouteTravelMiles(route,arr)-scenarioRouteTravelMiles(route,routeStops);
+}
+function scenarioSequenceRoute(routeId,opts){
+  const route=routes.find(r=>r.id===routeId);if(!route)return;const list=stops.filter(s=>s.routeId===routeId&&s.lat&&s.lng);if(list.length<2)return;
+  const locked=opts.removeSequenceLock?[]:list.filter(s=>preferredPosition(s)>0); const movable=list.filter(s=>!locked.includes(s)); const start=routeInitialDepot(route)||movable[0]||locked[0]; let cur=start,ordered=[],cursor=scenarioOriginalStart(route);
+  while(movable.length){let bestI=0,best=Infinity;movable.forEach((s,i)=>{const legMiles=roadAdjustedMiles(haversine(cur.lat,cur.lng,s.lat,s.lng));const travelMins=driveMinutesForMiles(legMiles/1.25);let score=opts.optMiles?legMiles:0;if(opts.optTime){const w=scenarioStopWindow(s),arrival=cursor+travelMins,wait=Number.isFinite(w.early)&&arrival<w.early?w.early-arrival:0,late=Number.isFinite(w.late)?Math.max(0,arrival+wait-w.late):0;score+=travelMins+wait+(late*1000);}if(!opts.optMiles&&!opts.optTime)score=legMiles;if(score<best){best=score;bestI=i;}});const next=movable.splice(bestI,1)[0];const legMiles=roadAdjustedMiles(haversine(cur.lat,cur.lng,next.lat,next.lng)),travelMins=driveMinutesForMiles(legMiles/1.25),w=scenarioStopWindow(next);cursor+=travelMins;if(Number.isFinite(w.early)&&cursor<w.early)cursor=w.early;cursor+=stopServiceMinutes(next);ordered.push(next);cur=next;}
+  if(!opts.removeSequenceLock&&locked.length){locked.sort((a,b)=>preferredPosition(a)-preferredPosition(b));locked.forEach(s=>{const pos=Math.max(0,Math.min(ordered.length,preferredPosition(s)-1));ordered.splice(pos,0,s);});}
+  ordered.forEach((s,i)=>s.seq=i+1);
+}
+function scenarioGlobalOptimize(opts){
+  const assigned=stops.filter(s=>s.sourceType==='route-data'&&s.routeId&&s.lat&&s.lng);if(!opts.removeRouteLock){routes.forEach(r=>scenarioSequenceRoute(r.id,opts));return;}
+  // Greedy marginal-insertion relocation. Multiple passes allow clusters to settle onto shorter route shapes.
+  for(let pass=0;pass<2;pass++){
+    for(const stop of assigned){const current=routes.find(r=>r.id===stop.routeId);if(!current)continue;let bestRoute=current,bestIndex=Math.max(0,(stop.seq||1)-1),bestScore=Infinity;
+      for(const route of routes){const rStops=stops.filter(s=>s.routeId===route.id&&s.id!==stop.id&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);const baseMiles=scenarioRouteTravelMiles(route,rStops);const baseTime=opts.optTime?scenarioEvaluateOrderedRoute(route,rStops,scenarioOriginalStart(route)):null;for(let i=0;i<=rStops.length;i++){const candidate=[...rStops];candidate.splice(i,0,stop);const newMiles=scenarioRouteTravelMiles(route,candidate);let score=opts.optMiles?(newMiles-baseMiles):0;if(opts.optTime){const sim=scenarioEvaluateOrderedRoute(route,candidate,scenarioOriginalStart(route));const deltaMins=(sim.hours-(baseTime?.hours||0))*60;score+=deltaMins+sim.waitMinutes*.25+sim.late*10000;}if(!opts.optMiles&&!opts.optTime)score=newMiles-baseMiles;if(score<bestScore){bestScore=score;bestRoute=route;bestIndex=i;}}}
+      stop.routeId=bestRoute.id;const rs=stops.filter(s=>s.routeId===bestRoute.id&&s.id!==stop.id).sort((a,b)=>a.seq-b.seq);rs.splice(bestIndex,0,stop);rs.forEach((s,i)=>s.seq=i+1);
+    }
+  }
+  routes.forEach(r=>scenarioSequenceRoute(r.id,opts));
+}
+function scenarioStopWindow(stop){const os=stop.orders||[];const early=os.map(o=>scenarioEpochMinutes(o.earliestRaw)).filter(Number.isFinite),late=os.map(o=>scenarioEpochMinutes(o.latestRaw)).filter(Number.isFinite);return {early:early.length?Math.min(...early):scenarioEpochMinutes(stop.earliestTimeWindowRaw),late:late.length?Math.max(...late):scenarioEpochMinutes(stop.latestTimeWindowRaw)};}
+function scenarioEvaluateOrderedRoute(route,rs,startEpoch){
+  if(!rs.length)return {miles:0,hours:0,waitMinutes:0,onTime:0,windowStops:0,late:0,startEpoch,endEpoch:startEpoch,stops:[]};let cursor=startEpoch,prev=routeInitialDepot(route),miles=0,wait=0,onTime=0,windowStops=0,late=0,details=[];
+  for(const s of rs){if(prev&&prev.lat&&prev.lng){const leg=roadAdjustedMiles(haversine(prev.lat,prev.lng,s.lat,s.lng));miles+=leg;cursor+=driveMinutesForMiles(leg/1.25);}const w=scenarioStopWindow(s);const rawArrival=cursor;let serviceStart=cursor,stopWait=0;if(Number.isFinite(w.early)&&serviceStart<w.early){stopWait=w.early-serviceStart;wait+=stopWait;serviceStart=w.early;}let ok=true;if(Number.isFinite(w.late)){windowStops++;if(serviceStart<=w.late){onTime++;}else{ok=false;late++;}}cursor=serviceStart+stopServiceMinutes(s);details.push({stopId:s.id,arrive:rawArrival,serviceStart,ok,wait:stopWait});prev=s;}
+  const fin=routeFinalDepot(route);if(prev&&fin&&fin.lat&&fin.lng){const leg=roadAdjustedMiles(haversine(prev.lat,prev.lng,fin.lat,fin.lng));miles+=leg;cursor+=driveMinutesForMiles(leg/1.25);}return {miles,hours:Math.max(0,(cursor-startEpoch)/60),waitMinutes:wait,onTime,windowStops,late,startEpoch,endEpoch:cursor,stops:details};
+}
+function scenarioSimulateRoute(route,startEpoch){const rs=stops.filter(s=>s.routeId===route.id&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);return scenarioEvaluateOrderedRoute(route,rs,startEpoch);}
+function scenarioOriginalStart(route){return scenarioEpochMinutes(route.routeData?.routeStart)||scenarioEpochMinutes((route.date||'')+' '+(route.earliestStartTime||'00:00'))||Date.now()/60000;}
+function scenarioOptimizeDispatch(route){
+  const original=scenarioOriginalStart(route);let best=null;for(let offset=-720;offset<=720;offset+=5){const start=original+offset,sim=scenarioSimulateRoute(route,start);const score=sim.late*100000+sim.waitMinutes*10+sim.hours+Math.abs(offset)*.001;if(!best||score<best.score)best={score,start,sim};}if(best){route.scenarioDispatchEpoch=best.start;const d=new Date(best.start*60000);route.earliestStartTime=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');route.latestStartTime=route.earliestStartTime;}return best;
+}
+function scenarioComputeBaselineMetrics(routeList,stopList){
+  const activeRoutes=routeList.filter(r=>stopList.some(s=>s.routeId===r.id));let miles=0,hours=0,waitMinutes=0,onTime=0,windowStops=0;activeRoutes.forEach(r=>{miles+=parseFloat(r.routeData?.totalDistanceMile)||0;hours+=(parseFloat(r.routeData?.totalTimeSeconds)||0)/3600;});stopList.filter(s=>s.routeId).forEach(s=>{waitMinutes+=(parseFloat(s.routeData?.waitSeconds)||0)/60;const w=scenarioStopWindow(s);const p=scenarioEpochMinutes(s.routeData?.plannedBegun||s.routeData?.plannedArrived);if(Number.isFinite(w.late)&&Number.isFinite(p)){windowStops++;if(p<=w.late&&(!Number.isFinite(w.early)||p>=w.early))onTime++;}});const cases=stopList.filter(s=>s.routeId).reduce((a,s)=>a+tCases(s),0),plannedStops=stopList.filter(s=>s.routeId).length;return {cases,miles,hours,waitMinutes,onTimePct:windowStops?onTime/windowStops*100:100,routesUsed:activeRoutes.length,stopsPlanned:plannedStops,casesPerMile:miles?cases/miles:0,casesPerManHour:hours?cases/hours:0,windowStops};
+}
+function scenarioComputeModelMetrics(opts){
+  let miles=0,hours=0,waitMinutes=0,onTime=0,windowStops=0;const activeRoutes=routes.filter(r=>stops.some(s=>s.routeId===r.id));activeRoutes.forEach(r=>{const start=Number.isFinite(r.scenarioDispatchEpoch)?r.scenarioDispatchEpoch:scenarioOriginalStart(r);const sim=scenarioSimulateRoute(r,start);miles+=sim.miles;hours+=sim.hours;waitMinutes+=sim.waitMinutes;onTime+=sim.onTime;windowStops+=sim.windowStops;});const cases=stops.filter(s=>s.routeId).reduce((a,s)=>a+tCases(s),0),plannedStops=stops.filter(s=>s.routeId).length;const expense=(opts.costMile||opts.costHour)?miles*opts.costMile+hours*opts.costHour:null;return {cases,miles,hours,waitMinutes,onTimePct:windowStops?onTime/windowStops*100:100,routesUsed:activeRoutes.length,stopsPlanned:plannedStops,casesPerMile:miles?cases/miles:0,casesPerManHour:hours?cases/hours:0,windowStops,expense};
+}
+function runScenarioModel(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}const opts=scenarioReadOptions();restoreScenarioBaseline();const removed=scenarioApplyFilters(opts);if(opts.optMiles||opts.optTime)scenarioGlobalOptimize(opts);if(opts.optDispatch)routes.forEach(r=>{if(stops.some(s=>s.routeId===r.id))scenarioOptimizeDispatch(r);});reseq();const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops)),modeled=scenarioComputeModelMetrics(opts);const originalExpense=(opts.costMile||opts.costHour)?original.miles*opts.costMile+original.hours*opts.costHour:null;if(originalExpense!==null)original.expense=originalExpense;scenarioLastRun={ranAt:new Date().toISOString(),options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),modeled:scenarioClone(modeled)};mapCleared=true;visibleRouteIds.clear();visibleStopIds.clear();render();closeModal('scenario-levers-modal');openScenarioAfterActionReport();}
+function scenarioDelta(metric,original,modeled,lowerIsBetter=false){const a=parseFloat(original?.[metric])||0,b=parseFloat(modeled?.[metric])||0,d=b-a,pct=a?d/a*100:0;const good=lowerIsBetter?d<0:d>0,bad=lowerIsBetter?d>0:d<0;return {d,pct,cls:good?'scenario-delta-good':bad?'scenario-delta-bad':'scenario-delta-neutral'};}
+function scenarioFmt(n,dec=1){return (parseFloat(n)||0).toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});}
+function scenarioReportMetric(label,key,formatter,lowerBetter=false){const r=scenarioLastRun,o=r.original,m=r.modeled,d=scenarioDelta(key,o,m,lowerBetter);return `<div class="scenario-report-row"><div><strong>${escapeHtml(label)}</strong></div><div>${formatter(o[key])}</div><div>${formatter(m[key])}</div><div class="${d.cls}">${d.d>=0?'+':''}${formatter(d.d)}${Math.abs(d.pct)>0.01?` (${d.pct>=0?'+':''}${d.pct.toFixed(1)}%)`:''}</div></div>`;}
+function openScenarioAfterActionReport(){
+  if(!scenarioLastRun){if(!scenarioBaseline){showToast('No scenario baseline is available yet.');return;}showToast('Run Model first to create an After Action comparison.');return;}const r=scenarioLastRun,o=r.original,m=r.modeled;const expenseRows=(o.expense!==undefined&&o.expense!==null)?scenarioReportMetric('Estimated Delivery Expense','expense',v=>formatCurrency(v),true):'';
+  const summary=document.getElementById('scenario-report-summary');summary.innerHTML=`<div class="scenario-kpi-grid"><div class="scenario-kpi"><div class="v">${scenarioFmt(o.cases,0)} → ${scenarioFmt(m.cases,0)}</div><div class="l">Cases Planned</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.miles)} → ${scenarioFmt(m.miles)}</div><div class="l">Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.hours)} → ${scenarioFmt(m.hours)}</div><div class="l">Route Hours</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.onTimePct)}% → ${scenarioFmt(m.onTimePct)}%</div><div class="l">Planned On Time</div></div></div><div class="scenario-note"><strong>Model actions:</strong> ${r.removed.removedOrders} order line(s) / ${scenarioFmt(r.removed.removedCases,0)} cases moved to Unassigned. Route Lock ${r.options.removeRouteLock?'removed':'retained'}; Sequence Lock ${r.options.removeSequenceLock?'removed':'retained'}; Miles optimization ${r.options.optMiles?'on':'off'}; Time optimization ${r.options.optTime?'on':'off'}; Dispatch optimization ${r.options.optDispatch?'on':'off'}.</div>`;
+  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',v=>scenarioFmt(v,2),false)}${scenarioReportMetric('Routes Used','routesUsed',v=>scenarioFmt(v,0),true)}${scenarioReportMetric('Miles Ran','miles',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Hours Ran','hours',v=>scenarioFmt(v,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',v=>scenarioFmt(v,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',v=>scenarioFmt(v,1)+'%',false)}${scenarioReportMetric('Wait Time (minutes)','waitMinutes',v=>scenarioFmt(v,0),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">Original miles/hours come from imported TotalDistanceMile and TotalTime. Modeled miles use geolocation-based road-distance estimates (straight-line × 1.25); modeled time uses the selected vehicle travel factor, imported stop service time, expanded windows, and modeled wait. This is a planning what-if model, not a turn-by-turn commercial routing engine.</div>`;document.getElementById('scenario-report-modal').style.display='flex';
+}
 
 // ============================================================
 // EXPORT
