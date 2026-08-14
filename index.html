@@ -650,6 +650,17 @@ body{background:var(--bg0);color:var(--text1);}
       </div>
       <div style="font-size:9px;color:var(--text3);margin-top:6px;">Select one or multiple RouteStart dates. Leave all dates unchecked to import every date in the file.</div>
     </div>
+    <div id="route-data-depot-filter" style="display:none;margin:10px 0 8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);">
+      <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;">Depot Filter <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(Import Route Data — starting depot)</span></div>
+      <div id="route-data-depot-values" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;font-size:10px;color:var(--text2);max-height:150px;overflow:auto;">
+        <span style="grid-column:1/-1;color:var(--text3);">Load a Route Detail file to see available starting depots.</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:7px;">
+        <button type="button" class="btn" style="padding:2px 6px;font-size:9px;" onclick="toggleAllRouteDataDepots(true)">Select All</button>
+        <button type="button" class="btn" style="padding:2px 6px;font-size:9px;" onclick="toggleAllRouteDataDepots(false)">Clear</button>
+      </div>
+      <div style="font-size:9px;color:var(--text3);margin-top:6px;">Select one or multiple starting depots. Leave all depots unchecked to import routes from every depot in the selected date range.</div>
+    </div>
     <input type="file" id="file-in" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleFileSelect(this)"/>
     <div id="imp-preview"></div>
     <div class="modal-actions">
@@ -986,6 +997,8 @@ let activeRouteFilterId=null;
 let activeStopFilterId=null;
 let mapRouteFilterActiveId=null;
 let mapRouteFilterSnapshot=null;
+let mapDepotFilterKey=null;
+let mapDepotFilterSnapshot=null;
 let measureFromStopId=null, measureLine=null;
 let streetViewPickMode=false;
 let manualSequenceRouteId=null, manualSequenceOrder=[], manualSequenceDragStopId=null;
@@ -1053,6 +1066,10 @@ window.addEventListener('DOMContentLoaded',()=>{
     }
     if(mapRouteFilterActiveId){
       restoreMapRouteFilter();
+      return;
+    }
+    if(mapDepotFilterKey){
+      restoreMapDepotFilter();
     }
   });
   const mapEl=document.getElementById('map');
@@ -1499,6 +1516,57 @@ function filterMapToRoute(routeId){
   fitRouteToMap(routeId);
   showToast(`Map filtered to ${routeDisplayName(route)}. Click the map to clear.`);
 }
+function routesRunningFromDepot(depotKey){
+  const needle=normalizeKey(depotKey).toUpperCase();
+  if(!needle)return [];
+  return routes.filter(r=>normalizeKey(r.initialLocationKey).toUpperCase()===needle);
+}
+function restoreMapDepotFilter(){
+  if(!mapDepotFilterSnapshot){
+    mapDepotFilterKey=null;
+    renderMap();
+    return;
+  }
+  mapCleared=mapDepotFilterSnapshot.mapCleared;
+  visibleRouteIds.clear();
+  mapDepotFilterSnapshot.visibleRouteIds.forEach(id=>visibleRouteIds.add(id));
+  visibleStopIds.clear();
+  mapDepotFilterSnapshot.visibleStopIds.forEach(id=>visibleStopIds.add(id));
+  visibleDepotIds.clear();
+  (mapDepotFilterSnapshot.visibleDepotIds||[]).forEach(id=>visibleDepotIds.add(id));
+  mapDepotFilterKey=null;
+  mapDepotFilterSnapshot=null;
+  renderMap();
+  updateDisplayToggleButtons();
+  showToast('Depot map filter cleared');
+}
+function filterMapToDepot(depotKey){
+  const key=normalizeKey(depotKey);
+  if(!key)return;
+  if(mapDepotFilterKey&&normalizeKey(mapDepotFilterKey).toUpperCase()===key.toUpperCase()){
+    restoreMapDepotFilter();
+    return;
+  }
+  if(mapRouteFilterActiveId)restoreMapRouteFilter();
+  if(!mapDepotFilterKey)mapDepotFilterSnapshot=snapshotCurrentMapVisibility();
+  const depotRoutes=routesRunningFromDepot(key);
+  if(!depotRoutes.length){showToast(`No routes are running out of depot ${key}`);return;}
+  mapDepotFilterKey=key;
+  mapCleared=true;
+  visibleRouteIds.clear();
+  visibleStopIds.clear();
+  visibleDepotIds.clear();
+  depotRoutes.forEach(r=>{
+    visibleRouteIds.add(r.id);
+    stops.filter(s=>s.routeId===r.id).forEach(s=>visibleStopIds.add(s.id));
+  });
+  depotLocations.filter(d=>normalizeKey(d.locationKey).toUpperCase()===key.toUpperCase()).forEach(d=>visibleDepotIds.add(d.id));
+  renderMap();
+  fitRoutesToMap(depotRoutes.map(r=>r.id));
+  updateDisplayToggleButtons();
+  showToast(`Map filtered to ${depotRoutes.length} route${depotRoutes.length===1?'':'s'} running out of ${key}. Click the depot again or the map to clear.`);
+}
+
 function clearAllFilters(){
   activeRouteFilterId=null;
   activeStopFilterId=null;
@@ -1506,6 +1574,10 @@ function clearAllFilters(){
   orderRouteFilter='';
   if(mapRouteFilterActiveId){
     restoreMapRouteFilter();
+  }else if(mapDepotFilterKey){
+    restoreMapDepotFilter();
+    renderRoutes();
+    renderUA();
   }else{
     renderRoutes();
     renderUA();
@@ -1872,7 +1944,10 @@ function renderMap(){
       iconSize:null,iconAnchor:[10,16]});
     const m=L.marker([d.lat,d.lng],{icon}).addTo(map);
     m.bindPopup(`<div style="font-family:Sora,sans-serif;min-width:240px;font-size:12px;"><b>DEPOT</b><br/><b>${escapeHtml(d.name||'Depot')}</b><br/>LocationKey: ${escapeHtml(d.locationKey||'')}<br/>Branch: ${escapeHtml(d.branchDivision||'—')}<br/>Market: ${escapeHtml(d.market||'—')}<br/>${escapeHtml(d.shipStreet||'')}<br/>${escapeHtml(d.shipCity||'')} ${escapeHtml(d.shipState||'')} ${escapeHtml(d.shipZipCode||'')}<br/><button class="btn primary" style="margin-top:7px;padding:3px 7px;font-size:10px;" onclick="cloneDepotAsStop('${d.id}')">Clone as Stop</button> <button class="btn" style="margin-top:7px;padding:3px 7px;font-size:10px;" onclick="openDepotDetail('${d.id}')">Details</button></div>`);
-    m.on('click',()=>openDepotDetail(d.id));
+    m.on('click',ev=>{
+      if(ev&&ev.originalEvent)L.DomEvent.stopPropagation(ev);
+      filterMapToDepot(d.locationKey);
+    });
     markers[depotId]=m;
   });
 
@@ -1890,7 +1965,11 @@ function renderMap(){
         html:`<div class="depot-map-label" style="color:${color};"><span class="depot-building">🏢</span><span class="depot-text"><span class="depot-type">${label} DEPOT</span><span class="depot-name">${safeDepotName}</span></span></div>`,
         iconSize:null,iconAnchor:[10,16]});
       const m=L.marker([depot.lat,depot.lng],{icon}).addTo(map);
-      m.bindPopup(`<div style="font-family:Sora,sans-serif;min-width:190px;font-size:12px;"><b>${label} DEPOT</b><br/><b>${depot.name||'Depot'}</b><br/>LocationKey: ${depot.locationKey||''}<br/>${depot.shipStreet||''}<br/>${depot.shipCity||''} ${depot.shipState||''} ${depot.shipZipCode||''}</div>`);
+      m.bindPopup(`<div style="font-family:Sora,sans-serif;min-width:190px;font-size:12px;"><b>${label} DEPOT</b><br/><b>${depot.name||'Depot'}</b><br/>LocationKey: ${depot.locationKey||''}<br/>${depot.shipStreet||''}<br/>${depot.shipCity||''} ${depot.shipState||''} ${depot.shipZipCode||''}<br/><span style="font-size:10px;color:#777;">Click depot marker to filter the map to routes running out of this depot.</span></div>`);
+      m.on('click',ev=>{
+        if(ev&&ev.originalEvent)L.DomEvent.stopPropagation(ev);
+        filterMapToDepot(depot.locationKey);
+      });
       markers[depotId]=m;
     });
 
@@ -3947,7 +4026,12 @@ function setImportMode(m){
   if(dayPanel)dayPanel.style.display=importMode==='all'?'block':'none';
   const routeDataDatePanel=document.getElementById('route-data-date-filter');
   if(routeDataDatePanel)routeDataDatePanel.style.display=importMode==='routedata'?'block':'none';
-  if(importMode==='routedata'&&pendingWB)populateRouteDataDateFilter(pendingWB);
+  const routeDataDepotPanel=document.getElementById('route-data-depot-filter');
+  if(routeDataDepotPanel)routeDataDepotPanel.style.display=importMode==='routedata'?'block':'none';
+  if(importMode==='routedata'&&pendingWB){
+    populateRouteDataDateFilter(pendingWB);
+    populateRouteDataDepotFilter(pendingWB);
+  }
   const exportInfo=document.getElementById('import-export-info');
   if(exportInfo)exportInfo.style.display=importMode==='routedata'?'none':'block';
 }
@@ -4020,6 +4104,73 @@ function populateRouteDataDateFilter(wb){
   });
   const sorted=[...dates].sort();
   host.innerHTML=sorted.length?sorted.map(key=>`<label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" class="route-data-date-chk" value="${escapeHtml(key)}" style="accent-color:var(--accent);"> ${escapeHtml(routeDataDateLabel(key))}</label>`).join(''):'<span style="grid-column:1/-1;color:var(--warn);">No usable RouteStart dates were found in the selected file.</span>';
+}
+
+function routeDataResourceKey(row){
+  return sval(gcLoose(row,['Resource Key','ResourceKey']));
+}
+function routeDataStartingDepotFromRows(rows){
+  const sorted=[...(rows||[])].sort((a,b)=>scenarioCleanFormula(gcLoose(a,['GeoStopNumber']))-scenarioCleanFormula(gcLoose(b,['GeoStopNumber']))||scenarioCleanFormula(gcLoose(a,['Stop Number']))-scenarioCleanFormula(gcLoose(b,['Stop Number'])));
+  const dRow=sorted.find(row=>sval(gcLoose(row,['LocationKey'])).trim().toUpperCase().startsWith('D')) || sorted.find(row=>!scenarioCustomerRow(row));
+  if(!dRow)return {key:'',name:''};
+  return {key:sval(gcLoose(dRow,['LocationKey'])).trim(),name:sval(gcLoose(dRow,['Customer','Company'])).trim()};
+}
+function routeDataDepotOptionsFromRows(rows){
+  const byRoute=new Map();
+  (rows||[]).forEach(row=>{
+    const resourceKey=routeDataResourceKey(row);
+    if(!resourceKey)return;
+    if(!byRoute.has(resourceKey))byRoute.set(resourceKey,[]);
+    byRoute.get(resourceKey).push(row);
+  });
+  const depots=new Map();
+  byRoute.forEach(routeRows=>{
+    const d=routeDataStartingDepotFromRows(routeRows);
+    const key=normalizeKey(d.key);
+    if(!key)return;
+    if(!depots.has(key))depots.set(key,{key,name:d.name||key});
+  });
+  return [...depots.values()].sort((a,b)=>(a.name||a.key).localeCompare(b.name||b.key,undefined,{numeric:true,sensitivity:'base'}));
+}
+function getSelectedRouteDataDepots(){
+  return new Set(Array.from(document.querySelectorAll('.route-data-depot-chk:checked')).map(cb=>normalizeKey(cb.value)));
+}
+function toggleAllRouteDataDepots(checked){
+  document.querySelectorAll('.route-data-depot-chk').forEach(cb=>cb.checked=checked);
+}
+function populateRouteDataDepotFilter(wb){
+  const host=document.getElementById('route-data-depot-values');
+  if(!host)return;
+  if(!wb){
+    host.innerHTML='<span style="grid-column:1/-1;color:var(--text3);">Load a Route Detail file to see available starting depots.</span>';
+    return;
+  }
+  const rows=[];
+  wb.SheetNames.forEach(name=>{
+    const ws=wb.Sheets[name];
+    const data=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+    const type=detectImportSheetType(name,data);
+    if(type!=='route data' && !(wb.SheetNames.length===1))return;
+    rows.push(...data);
+  });
+  const depots=routeDataDepotOptionsFromRows(rows);
+  host.innerHTML=depots.length?depots.map(d=>`<label style="display:flex;align-items:flex-start;gap:5px;cursor:pointer;"><input type="checkbox" class="route-data-depot-chk" value="${escapeHtml(d.key)}" style="accent-color:var(--accent);margin-top:1px;"> <span><strong>${escapeHtml(d.name||d.key)}</strong><br/><span style="font-size:9px;color:var(--text3);">${escapeHtml(d.key)}</span></span></label>`).join(''):'<span style="grid-column:1/-1;color:var(--warn);">No starting depot LocationKeys were found in the selected file.</span>';
+}
+function filterRouteDataRowsByStartingDepot(rows,selectedDepots){
+  if(!selectedDepots||!selectedDepots.size)return rows;
+  const byRoute=new Map();
+  (rows||[]).forEach(row=>{
+    const resourceKey=routeDataResourceKey(row);
+    if(!resourceKey)return;
+    if(!byRoute.has(resourceKey))byRoute.set(resourceKey,[]);
+    byRoute.get(resourceKey).push(row);
+  });
+  const allowedResources=new Set();
+  byRoute.forEach((routeRows,resourceKey)=>{
+    const depot=routeDataStartingDepotFromRows(routeRows);
+    if(selectedDepots.has(normalizeKey(depot.key)))allowedResources.add(resourceKey);
+  });
+  return (rows||[]).filter(row=>allowedResources.has(routeDataResourceKey(row)));
 }
 
 function routeMatchesSelectedDay(row){
@@ -4111,7 +4262,7 @@ function readFile(file){
     try{
       const wb=XLSX.read(e.target.result,{type:'array'});
       pendingWB=wb;
-      if(importMode==='routedata')populateRouteDataDateFilter(wb);
+      if(importMode==='routedata'){populateRouteDataDateFilter(wb);populateRouteDataDepotFilter(wb);}
       let sheetInfo=wb.SheetNames.map(name=>{
         const data=XLSX.utils.sheet_to_json(wb.Sheets[name],{defval:''});
         return {name, rows:data.length, type:detectImportSheetType(name,data)||'not detected'};
@@ -4157,11 +4308,18 @@ function confirmImport(){
       }
       const routeRows=[]; routeDataSheets.forEach(x=>routeRows.push(...x.data));
       const selectedRouteDates=getSelectedRouteDataDates();
-      const filteredRouteRows=selectedRouteDates.size
+      const selectedRouteDepots=getSelectedRouteDataDepots();
+      const dateFilteredRouteRows=selectedRouteDates.size
         ? routeRows.filter(row=>selectedRouteDates.has(routeDataDateKey(gcLoose(row,['RouteStart','Route Start','Route Start Date']))))
         : routeRows;
-      if(selectedRouteDates.size&&!filteredRouteRows.length){
+      if(selectedRouteDates.size&&!dateFilteredRouteRows.length){
         showToast('No Route Detail rows matched the selected RouteStart date(s).');
+        if(btn){btn.disabled=false;btn.textContent=originalText||'Import Data';}
+        return;
+      }
+      const filteredRouteRows=filterRouteDataRowsByStartingDepot(dateFilteredRouteRows,selectedRouteDepots);
+      if(selectedRouteDepots.size&&!filteredRouteRows.length){
+        showToast('No routes matched the selected starting depot(s) within the selected RouteStart date(s).');
         if(btn){btn.disabled=false;btn.textContent=originalText||'Import Data';}
         return;
       }
@@ -4223,7 +4381,8 @@ function confirmImport(){
         showIncrementalOrderImportSummary(orderImportSummary);
       }else if(importMode==='routedata'){
         const selectedDateCount=getSelectedRouteDataDates().size;
-        showToast(`Imported route baseline: ${rc} routes, ${sc} consolidated customer stops, ${lc} depots${selectedDateCount?` across ${selectedDateCount} selected RouteStart date${selectedDateCount===1?'':'s'}`:''}. Scenario Levers are ready.`);
+        const selectedDepotCount=getSelectedRouteDataDepots().size;
+        showToast(`Imported route baseline: ${rc} routes, ${sc} consolidated customer stops, ${lc} depots${selectedDateCount?` across ${selectedDateCount} selected RouteStart date${selectedDateCount===1?'':'s'}`:''}${selectedDepotCount?` from ${selectedDepotCount} selected starting depot${selectedDepotCount===1?'':'s'}`:''}. Scenario Levers are ready.`);
       }else{
         const skipText=skipped?`, ${skipped} skipped/not detected`:'';
         showToast(`Imported: ${rc} route rows, ${dc} truck rows, ${sc} stop rows, ${lc} depot rows${skipText}`);
