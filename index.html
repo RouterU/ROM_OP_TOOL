@@ -1717,6 +1717,7 @@ function renderStats(){
     <div class="stat"><div class="stat-val">${Math.round(tw).toLocaleString()}</div><div class="stat-lbl">Weight</div></div>
     <div class="stat"><div class="stat-val">${tcu.toFixed(1)}</div><div class="stat-lbl">Cube</div></div>
     <div class="stat" style="display:flex;align-items:center;justify-content:center;"><button class="btn" style="padding:3px 8px;font-size:10px;" onclick="clearAllFilters()">Clear Filters</button></div>
+    <div class="stat" id="bulk-remove-routes-wrap" style="display:${routes.some(r=>r.selected)?'flex':'none'};align-items:center;justify-content:center;"><button class="btn" style="padding:3px 9px;font-size:10px;background:#ef4444;border-color:#ef4444;color:#fff;" onclick="removeSelectedRoutesFromSession()">Remove From Session</button></div>
     <div class="stat" style="margin-left:auto;display:flex;align-items:center;justify-content:center;gap:6px;min-width:250px;">
       <button class="btn" style="padding:3px 8px;font-size:10px;" onclick="saveWorkSession()" title="Download the current routing session as a local JSON backup file">Save Work</button>
       <button class="btn" style="padding:3px 8px;font-size:10px;" onclick="loadSavedWork()" title="Load a previously saved RouteDesk session JSON file">Load Saved Work</button>
@@ -1807,6 +1808,7 @@ function renderRoutes(){
         <div class="r-colorbar" style="background:${color}"></div>
         <div class="r-info">
           <div class="r-name">${escapeHtml(routeDisplayName(r))}${r.published?'<span style="display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;background:rgba(62,207,142,.16);border:1px solid rgba(62,207,142,.45);color:var(--success);font-size:9px;font-weight:800;box-shadow:0 3px 10px rgba(0,0,0,.35);vertical-align:middle;">Published</span>':''}</div>
+          ${r.resourceName?`<div style="font-size:10px;font-weight:700;color:var(--text1);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.resourceName)}</div>`:''}
           <div class="r-meta">${rStops.length} stops &middot; ${cs}cs &middot; ${Math.round(wt)}lbs &middot; ${cu.toFixed(1)}cu &middot; ${routeDistanceMiles(r.id).toFixed(1)}mi &middot; ${fmtMinutes(routeTotalMinutes(r.id))} &middot; ${dname}</div>
           <div class="r-timing">${fmtTiming(r)}${r.udfNumber1?' · UDF#1:'+r.udfNumber1:''}${r.initialLocationKey||r.finalLocationKey?' · Depot '+(r.initialLocationKey||'—')+' → '+(r.finalLocationKey||'—'):''}</div>
         </div>
@@ -2034,6 +2036,8 @@ function updateApplyBar(){
   const sel=routes.filter(r=>r.selected).length;
   document.getElementById('sel-count').textContent=sel?`${sel} selected`:'';
   document.getElementById('chk-all').checked=routes.length>0&&routes.every(r=>r.selected);
+  const bulkRemoveWrap=document.getElementById('bulk-remove-routes-wrap');
+  if(bulkRemoveWrap)bulkRemoveWrap.style.display=sel?'flex':'none';
   updateExportSelectedButton();
 }
 
@@ -2316,8 +2320,11 @@ function openRouteDetail(routeId){
   document.getElementById('route-detail-title').textContent=`Edit Route Template Details: ${r.name||'Route'}`;
   document.getElementById('route-detail-body').innerHTML=`<div class="stop-detail-grid">
     ${detailInput('ed-r-name','Route Name',r.name)}
+    ${detailInput('ed-r-resourceName','Resource Name',r.resourceName||r.routeData?.resourceName||'')}
     ${detailInput('ed-r-routeTemplateKey','RouteTemplateKey',r.routeTemplateKey)}
     ${detailInput('ed-r-date','Route Date',r.date||document.getElementById('route-date')?.value||'','date')}
+    ${detailInput('ed-r-routeSummaryStart','Route Start',r.routeSummaryStart||r.routeData?.routeStart||'')}
+    ${detailInput('ed-r-routeSummaryEnd','Route End',r.routeSummaryEnd||r.routeData?.routeEnd||'')}
     ${detailInput('ed-r-scheduleKey','ScheduleKey',r.scheduleKey)}
     ${detailInput('ed-r-udfNumber1','UDFNumber1',r.udfNumber1)}
     ${detailInput('ed-r-udfString2','UDFString2 / Route Day',r.udfString2)}
@@ -2348,8 +2355,12 @@ function saveRouteDetail(){
   const name=strVal('ed-r-name').trim();
   if(!name){showToast('Route name is required');return;}
   r.name=name;
+  r.resourceName=strVal('ed-r-resourceName');
   r.routeTemplateKey=strVal('ed-r-routeTemplateKey');
   r.date=strVal('ed-r-date');
+  r.routeSummaryStart=strVal('ed-r-routeSummaryStart');
+  r.routeSummaryEnd=strVal('ed-r-routeSummaryEnd');
+  if(r.routeData){r.routeData.resourceName=r.resourceName;r.routeData.routeStart=r.routeSummaryStart;r.routeData.routeEnd=r.routeSummaryEnd;}
   r.scheduleKey=strVal('ed-r-scheduleKey');
   r.udfNumber1=strVal('ed-r-udfNumber1');
   r.udfString2=strVal('ed-r-udfString2');
@@ -2400,6 +2411,50 @@ function removeStopFromSession(){
   render();
   if(activeManifestRouteId)renderRouteManifest();
   showToast('Stop removed from session');
+}
+
+function removeSelectedRoutesFromSession(){
+  const selectedRoutes=routes.filter(r=>r.selected);
+  if(!selectedRoutes.length){showToast('Select one or more routes first');return;}
+  const selectedIds=new Set(selectedRoutes.map(r=>r.id));
+  const assignedStops=stops.filter(s=>selectedIds.has(s.routeId));
+  const label=selectedRoutes.length===1?routeDisplayName(selectedRoutes[0]):`${selectedRoutes.length} selected routes`;
+  if(!confirm(`Remove ${label} from this routing session?`))return;
+
+  let removeAssignedOrders=false;
+  if(assignedStops.length){
+    removeAssignedOrders=confirm(`The selected route${selectedRoutes.length===1?' has':'s have'} ${assignedStops.length} assigned stop(s).
+
+Select OK to remove those stops from the session too.
+Select Cancel to keep the stops and move them to Unassigned.`);
+  }
+
+  if(removeAssignedOrders){
+    const stopIds=new Set(assignedStops.map(s=>s.id));
+    stopIds.forEach(stopId=>{
+      visibleStopIds.delete(stopId);
+      delete potColors[stopId];
+      delete potRouteSuggestions[stopId];
+      if(markers[stopId]){try{map.removeLayer(markers[stopId]);}catch(e){} delete markers[stopId];}
+    });
+    stops=stops.filter(s=>!stopIds.has(s.id));
+  }else{
+    assignedStops.forEach(s=>{s.routeId=null;s.seq=0;s.uiChecked=false;});
+  }
+
+  selectedIds.forEach(routeId=>{
+    expanded.delete(routeId);
+    visibleRouteIds.delete(routeId);
+    if(polylines[routeId]){try{map.removeLayer(polylines[routeId]);}catch(e){} delete polylines[routeId];}
+    if(roadPolylines[routeId]){try{map.removeLayer(roadPolylines[routeId]);}catch(e){} delete roadPolylines[routeId];}
+    Object.keys(markers).forEach(key=>{if(key.startsWith(`depot-${routeId}-`)){try{map.removeLayer(markers[key]);}catch(e){} delete markers[key];}});
+  });
+  routes=routes.filter(r=>!selectedIds.has(r.id));
+  if(activeManifestRouteId&&selectedIds.has(activeManifestRouteId)){activeManifestRouteId=null;closeModal('route-manifest-modal');}
+  if(activeDetailRouteId&&selectedIds.has(activeDetailRouteId)){activeDetailRouteId=null;closeModal('route-detail-modal');}
+  reseq();
+  render();
+  showToast(removeAssignedOrders?`Removed ${selectedRoutes.length} route(s) and ${assignedStops.length} stop(s) from session`:`Removed ${selectedRoutes.length} route(s); ${assignedStops.length} stop(s) moved to Unassigned`);
 }
 
 function removeRouteFromSession(){
@@ -5943,17 +5998,22 @@ function scenarioBuildTruckCapacityReferences(routeSummaryRows,truckDefaultRows)
     if(!(cube>0||weight>0))return;
     defaultsBySuffix.set(suffix,{truckKey:key,suffix,cube,weight,vehicleType:sval(gcLoose(row,['VehicleType','Vehicle Type'])),name:sval(gcLoose(row,['Name']))});
   });
-  const summaryExact=new Map(),summaryBase=new Map();
+  const summaryExact=new Map(),summaryBase=new Map(),summaryMetaExact=new Map();
   (routeSummaryRows||[]).forEach(row=>{
     const resource=sval(gcLoose(row,['Resource Key','ResourceKey'])).trim();
     const truckKey=sval(gcLoose(row,['TruckKey','Truck Key'])).trim();
-    if(!resource||!truckKey)return;
+    if(!resource)return;
+    const resourceName=sval(gcLoose(row,['Resource Name','ResourceName'])).trim();
+    const routeStart=sval(gcLoose(row,['Route Start','RouteStart'])).trim();
+    const routeEnd=sval(gcLoose(row,['Route End','RouteEnd'])).trim();
+    summaryMetaExact.set(resource.toUpperCase(),{resourceName,routeStart,routeEnd,truckKey,raw:{...row}});
+    if(!truckKey)return;
     summaryExact.set(resource.toUpperCase(),truckKey);
     const base=scenarioResourceBase(resource);
     if(!summaryBase.has(base))summaryBase.set(base,new Set());
     summaryBase.get(base).add(truckKey);
   });
-  return {defaultsBySuffix,summaryExact,summaryBase};
+  return {defaultsBySuffix,summaryExact,summaryBase,summaryMetaExact};
 }
 function scenarioResolveTruckCapacity(resourceKey,routeRows,refs){
   const fromDetails=(routeRows||[]).map(r=>sval(gcLoose(r,['TruckKey','Truck Key'])).trim()).find(Boolean)||'';
@@ -6000,9 +6060,12 @@ function importScenarioRouteData(data,routeSummaryRows=[],truckDefaultRows=[]){
     const sorted=[...rows].sort((a,b)=>scenarioCleanFormula(gcLoose(a,['GeoStopNumber']))-scenarioCleanFormula(gcLoose(b,['GeoStopNumber']))||scenarioCleanFormula(gcLoose(a,['Stop Number']))-scenarioCleanFormula(gcLoose(b,['Stop Number'])));
     const depotRows=sorted.filter(r=>!scenarioCustomerRow(r)); const first=depotRows[0]||sorted[0], last=depotRows[depotRows.length-1]||sorted[sorted.length-1];
     const init=scenarioUpsertDepot(first,resourceKey+'_START'), fin=scenarioUpsertDepot(last,resourceKey+'_END');
-    const routeStart=sval(gcLoose(first,['RouteStart'])), routeEnd=sval(gcLoose(first,['RouteEnd']));
+    const summaryMeta=truckRefs.summaryMetaExact?.get(sval(resourceKey).toUpperCase())||null;
+    const detailRouteStart=sval(gcLoose(first,['RouteStart'])), detailRouteEnd=sval(gcLoose(first,['RouteEnd']));
+    const routeStart=summaryMeta?.routeStart||detailRouteStart, routeEnd=summaryMeta?.routeEnd||detailRouteEnd;
+    const resourceName=summaryMeta?.resourceName||'';
     const truckRef=scenarioResolveTruckCapacity(resourceKey,rows,truckRefs);
-    const route={id:uid(),sourceType:'route-data',importIdentity:'ROUTEDATA|'+resourceKey,name:resourceKey,routeTemplateKey:resourceKey,date:scenarioIsoDate(routeStart)||scenarioIsoDate(gcLoose(first,['Planned Arrived Date'])),scheduleKey:'',udfNumber1:first4Digits(resourceKey),udfString2:sval(gcLoose(first,['UDFString2'])),initialLocationKey:init?.locationKey||'',finalLocationKey:fin?.locationKey||'',earliestStartTime:scenarioTime(routeStart),latestStartTime:scenarioTime(routeStart),latestEndTime:scenarioTime(routeEnd),startupTime:0,windupTime:0,driverKey:sval(gcLoose(first,['Driver Key','DriverKey'])),truckKey:truckRef.truckKey||sval(gcLoose(first,['TruckKey','Truck Key'])),trailerKey:sval(gcLoose(first,['Trailer Key','TrailerKey'])),requirements:sval(gcLoose(first,['Requirements'])),work1Duration:'',routingParameterKey:'',selected:false,dummyCapacity:truckRef.capacity?{totalCube:truckRef.capacity.totalCube,weight:truckRef.capacity.weight}:{totalCube:0,weight:0},scenarioTruckCapacity:truckRef.capacity?{totalCube:truckRef.capacity.totalCube,weight:truckRef.capacity.weight}:null,routeData:{resourceKey,routeStart,routeEnd,totalDistanceMile:scenarioCleanFormula(gcLoose(first,['TotalDistanceMile'])),totalTimeSeconds:scenarioDurationSeconds(gcLoose(first,['TotalTime'])),startServiceSeconds:scenarioDurationSeconds(gcLoose(first,['StopServiceTime'])),truckReference:{assignedTruckKey:truckRef.truckKey,truckSuffix:truckRef.suffix,matchMode:truckRef.matchMode,defaultTruckKey:truckRef.defaultTruckKey,defaultName:truckRef.defaultName,vehicleType:truckRef.vehicleType,cubeCapacity:truckRef.capacity?.totalCube||0,weightCapacity:truckRef.capacity?.weight||0},rawRows:rows.map(r=>({...r}))}};
+    const route={id:uid(),sourceType:'route-data',importIdentity:'ROUTEDATA|'+resourceKey,name:resourceKey,resourceName,routeTemplateKey:resourceKey,date:scenarioIsoDate(routeStart)||scenarioIsoDate(gcLoose(first,['Planned Arrived Date'])),scheduleKey:'',udfNumber1:first4Digits(resourceKey),udfString2:sval(gcLoose(first,['UDFString2'])),initialLocationKey:init?.locationKey||'',finalLocationKey:fin?.locationKey||'',earliestStartTime:scenarioTime(routeStart),latestStartTime:scenarioTime(routeStart),latestEndTime:scenarioTime(routeEnd),routeSummaryStart:routeStart,routeSummaryEnd:routeEnd,startupTime:0,windupTime:0,driverKey:sval(gcLoose(first,['Driver Key','DriverKey'])),truckKey:truckRef.truckKey||sval(gcLoose(first,['TruckKey','Truck Key'])),trailerKey:sval(gcLoose(first,['Trailer Key','TrailerKey'])),requirements:sval(gcLoose(first,['Requirements'])),work1Duration:'',routingParameterKey:'',selected:false,dummyCapacity:truckRef.capacity?{totalCube:truckRef.capacity.totalCube,weight:truckRef.capacity.weight}:{totalCube:0,weight:0},scenarioTruckCapacity:truckRef.capacity?{totalCube:truckRef.capacity.totalCube,weight:truckRef.capacity.weight}:null,routeData:{resourceKey,resourceName,routeStart,routeEnd,routeSummaryRaw:summaryMeta?.raw||null,totalDistanceMile:scenarioCleanFormula(gcLoose(first,['TotalDistanceMile'])),totalTimeSeconds:scenarioDurationSeconds(gcLoose(first,['TotalTime'])),startServiceSeconds:scenarioDurationSeconds(gcLoose(first,['StopServiceTime'])),truckReference:{assignedTruckKey:truckRef.truckKey,truckSuffix:truckRef.suffix,matchMode:truckRef.matchMode,defaultTruckKey:truckRef.defaultTruckKey,defaultName:truckRef.defaultName,vehicleType:truckRef.vehicleType,cubeCapacity:truckRef.capacity?.totalCube||0,weightCapacity:truckRef.capacity?.weight||0},rawRows:rows.map(r=>({...r}))}};
     routes.push(route); routeCount++;
     const customers=rows.filter(scenarioCustomerRow); const grouped=new Map();
     customers.forEach(row=>{const loc=sval(gcLoose(row,['LocationKey']))||sval(gcLoose(row,['Customer']));const k=loc.toUpperCase();if(!grouped.has(k))grouped.set(k,[]);grouped.get(k).push(row);});
