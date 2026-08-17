@@ -394,6 +394,33 @@ body{background:var(--bg0);color:var(--text1);}
 .scenario-delta-neutral{color:var(--text2);font-weight:700;}
 .scenario-note{background:rgba(207,69,32,.10);border:1px solid rgba(207,69,32,.35);border-radius:8px;padding:9px;font-size:10px;color:var(--text2);line-height:1.45;}
 
+
+/* v23.1 - Route Manifest sizing fix. Placed after generic .modal rule so it wins the cascade. */
+#route-manifest-modal > .modal.manifest-modal{
+  width:min(1500px,96vw);
+  max-width:96vw;
+  height:92vh;
+  max-height:92vh;
+  padding:18px;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+#route-manifest-modal #manifest-list{
+  flex:1 1 auto;
+  min-height:0;
+  max-height:none;
+  overflow:auto;
+}
+#route-manifest-modal .manifest-stats{
+  flex:0 0 auto;
+}
+#route-manifest-modal .modal-actions{
+  flex:0 0 auto;
+}
+@media (max-width:900px){
+  #route-manifest-modal > .modal.manifest-modal{width:98vw;max-width:98vw;height:94vh;max-height:94vh;padding:12px;}
+}
 </style>
 </head>
 <body>
