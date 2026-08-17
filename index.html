@@ -5759,6 +5759,27 @@ function exportRouteValue(route){
   return value.replace(/_.*$/,'');
 }
 
+function outputRawValue(order,stop,keys){
+  const fromOrder=sval(rawField(order,keys));
+  if(fromOrder)return fromOrder;
+  if(stop?.raw){const v=sval(gcLoose(stop.raw,keys));if(v)return v;}
+  const rawRows=stop?.routeData?.rawRows;
+  if(Array.isArray(rawRows)&&rawRows.length){
+    for(const row of rawRows){const v=sval(gcLoose(row,keys));if(v)return v;}
+  }
+  return '';
+}
+function outputRequirements(order,stop,route){
+  return order?.orderRequirements||outputRawValue(order,stop,['Requirements','Order Requirements'])||stop?.requirements||route?.requirements||'';
+}
+function outputProjectedDistanceMiles(pt){
+  if(!pt||!Number.isFinite(parseFloat(pt.legMiles)))return 0;
+  return parseFloat(roadAdjustedMiles(parseFloat(pt.legMiles)).toFixed(2));
+}
+function outputProjectedDriveSeconds(pt){
+  if(!pt||!Number.isFinite(parseFloat(pt.driveMins)))return 0;
+  return Math.round(parseFloat(pt.driveMins)*60);
+}
 function buildOutputFileRows(routeIdSet=null){
   const rows=[];
   const sessionDate=document.getElementById('route-date')?.value||new Date().toISOString().slice(0,10);
@@ -5771,11 +5792,13 @@ function buildOutputFileRows(routeIdSet=null){
     if(!routeCustomerStops.length)return;
     const timeline=routeTimelineRows(route.id);
     timeline.forEach(pt=>{
+      const projectedDistance=outputProjectedDistanceMiles(pt);
+      const projectedTimeDriven=outputProjectedDriveSeconds(pt);
       if(pt.type!=='stop'){
         const d=pt.depot||{};
         rows.push({
           'District':route.district||'',
-          'Region Code':outputRegionCode||route.regionCode||route.region||'',
+          'Region_Code':outputRegionCode||route.regionCode||route.region||'',
           'Route':exportRouteValue(route),
           'Customer':d.locationKey||'',
           'Sequence':pt.type==='depot-start'?0:(stops.filter(s=>s.routeId===route.id).length+1),
@@ -5795,10 +5818,31 @@ function buildOutputFileRows(routeIdSet=null){
           'routeprojectedDepartedDate':outputDateOnlyFromMinutes(route,pt.depart),
           'locationType':'DEPOT',
           'stoptype':0,
-          'Measure1':'',
-          'Measure2':'',
-          'Measure3':'',
-          'udfString3':''
+          'measure1':'',
+          'measure2':'',
+          'measure3':'',
+          'udfString3':'',
+          'Requirements':route.requirements||'',
+          'LocationKey':d.locationKey||'',
+          'Address':d.shipStreet||d.address||'',
+          'ZipCode':d.shipZipCode||d.zip||'',
+          'City':d.shipCity||d.city||'',
+          'State':d.shipState||d.state||'',
+          'Country':d.country||'US',
+          'Latitude':d.lat??'',
+          'Longitude':d.lng??'',
+          'ActivityWindowEarliestTime':'',
+          'ActivityWindowLatestTime':'',
+          'LocationWindowEarliestTime':'',
+          'LocationWindowLatestTime':'',
+          'Frequency':'',
+          'CustomerName':d.name||d.locationKey||'Depot',
+          'ProjectedDistance':projectedDistance,
+          'ProjectedTimeDriven':projectedTimeDriven,
+          'ProjectedBreaks':0,
+          'ProjectedBreakTime':0,
+          'UdfString1':route.udfString1||'',
+          'UdfString2':route.udfString2||''
         });
         return;
       }
@@ -5813,11 +5857,30 @@ function buildOutputFileRows(routeIdSet=null){
         const fixed=fixedServiceSecondsForOutput(order,stop);
         const region=outputRegionCode||sval(rawField(order,['Region_Code','Region Code','REGION_CODE','Region']))||route.regionCode||route.region||'';
         const parent=order.parentCustomer||sval(rawField(order,['PARENT_CUSTOMER','Parent Customer','ParentCustomer','Parent Account','ParentAccount','PARENT_ACCOUNT']))||order.alternativeCustomerNumber||'';
+        const customer=order.customerNumber||stop.customerNumber||order.shipToId||stop.shipToId||order.locationKey||stop.locationKey||'';
+        const locationKey=order.locationKey||stop.locationKey||order.shipToId||stop.shipToId||'';
+        const address=order.address||stop.address||outputRawValue(order,stop,['Address','Street Name','Street','ShipStreet'])||'';
+        const zip=order.zip||stop.zip||outputRawValue(order,stop,['ZipCode','Zipcode','Zip','ZIP'])||'';
+        const city=order.city||stop.city||outputRawValue(order,stop,['City'])||'';
+        const state=order.state||stop.state||outputRawValue(order,stop,['State'])||'';
+        const country=order.country||stop.country||outputRawValue(order,stop,['Country'])||'US';
+        const latitude=Number.isFinite(parseFloat(order.lat))?parseFloat(order.lat):(Number.isFinite(parseFloat(stop.lat))?parseFloat(stop.lat):'');
+        const longitude=Number.isFinite(parseFloat(order.lng))?parseFloat(order.lng):(Number.isFinite(parseFloat(stop.lng))?parseFloat(stop.lng):'');
+        const activityEarly=order.activityWindowEarliestTimeRaw||order.activityWindowEarliestTime||stop.activityWindowEarliestTimeRaw||stop.activityWindowEarliestTime||outputRawValue(order,stop,['ActivityWindowEarliestTime','Activity Window Earliest Time'])||'';
+        const activityLate=order.activityWindowLatestTimeRaw||order.activityWindowLatestTime||stop.activityWindowLatestTimeRaw||stop.activityWindowLatestTime||outputRawValue(order,stop,['ActivityWindowLatestTime','Activity Window Latest Time'])||'';
+        const locationEarly=order.locationWindowEarliestTime||stop.locationWindowEarliestTime||outputRawValue(order,stop,['LocationWindowEarliestTime','Location Window Earliest Time'])||'';
+        const locationLate=order.locationWindowLatestTime||stop.locationWindowLatestTime||outputRawValue(order,stop,['LocationWindowLatestTime','Location Window Latest Time'])||'';
+        const frequency=(order.frequency??stop.frequency??outputRawValue(order,stop,['Frequency']))||'';
+        const customerName=order.customerName||stop.customerName||outputRawValue(order,stop,['CustomerName','Customer Name','Customer','Company'])||'';
+        const rawBreaks=outputRawValue(order,stop,['ProjectedBreaks','Projected Breaks','Breaks']);
+        const rawBreakTime=outputRawValue(order,stop,['ProjectedBreakTime','Projected Break Time','Break Time','BreakTime']);
+        const udf1=outputRawValue(order,stop,['UdfString1','UDFString1','UDF String 1'])||route.udfString1||'';
+        const udf2=outputRawValue(order,stop,['UdfString2','UDFString2','UDF String 2'])||route.udfString2||'';
         rows.push({
           'District':order.district||stop.district||'',
-          'Region Code':region,
+          'Region_Code':region,
           'Route':exportRouteValue(route),
-          'Customer':order.locationKey||stop.locationKey||order.customerNumber||stop.customerNumber||order.shipToId||stop.shipToId||'',
+          'Customer':customer,
           'Sequence':stop.seq||'',
           'Order_number':order.orderNumber||stop.orderNumber||'',
           'Parent Account':parent,
@@ -5828,27 +5891,38 @@ function buildOutputFileRows(routeIdSet=null){
           'serviceDurationPerCaseInSeconds':cases?parseFloat((variable/cases).toFixed(6)):0,
           'ServiceDuration':fixed,
           'FixedserviceDuration':variable+fixed,
-          'udfString4':order.orderCodes||sval(rawField(order,['Order Codes','OrderCodes','ORDER_CODES'])),
+          'udfString4':order.orderCodes||sval(rawField(order,['Order Codes','OrderCodes','ORDER_CODES','udfString4','UDFString4']))||'',
           'truckKey':route.truckKey||'',
           'driverKey':route.driverKey||'',
           'routename':route.name||'',
           'routeprojectedDepartedDate':outputDateOnlyFromMinutes(route,pt.depart),
           'locationType':'CUSTOMER',
           'stoptype':orderCount(stop),
-          'Measure1':cases,
-          'Measure2':parseFloat(cube.toFixed(2)),
-          'Measure3':parseFloat(weight.toFixed(2)),
-          'udfString3':order.alternativeCustomerNumber||sval(rawField(order,['Alternative customer number','Alternative Customer Number','AlternativeCustomerNumber'])),
-          'Standard Route':order.standardRoute||stop.standardRoute||'',
-          'Standard Sequence':order.standardSequence||stop.standardSequence||'',
-          'Profit':nval(order.profit),
-          'PARENT_CUSTOMER':order.parentCustomer||stop.parentCustomer||'',
-          'LocationKey':order.locationKey||stop.locationKey||'',
-          'ActivityWindowEarliestTime':order.activityWindowEarliestTimeRaw||order.activityWindowEarliestTime||'',
-          'ActivityWindowLatestTime':order.activityWindowLatestTimeRaw||order.activityWindowLatestTime||'',
-          'LocationWindowEarliestTime':order.locationWindowEarliestTime||'',
-          'LocationWindowLatestTime':order.locationWindowLatestTime||'',
-          'Frequency':order.frequency||''
+          'measure1':cases,
+          'measure2':parseFloat(cube.toFixed(2)),
+          'measure3':parseFloat(weight.toFixed(2)),
+          'udfString3':order.alternativeCustomerNumber||sval(rawField(order,['Alternative customer number','Alternative Customer Number','AlternativeCustomerNumber','udfString3','UDFString3']))||'',
+          'Requirements':outputRequirements(order,stop,route),
+          'LocationKey':locationKey,
+          'Address':address,
+          'ZipCode':zip,
+          'City':city,
+          'State':state,
+          'Country':country,
+          'Latitude':latitude,
+          'Longitude':longitude,
+          'ActivityWindowEarliestTime':activityEarly,
+          'ActivityWindowLatestTime':activityLate,
+          'LocationWindowEarliestTime':locationEarly,
+          'LocationWindowLatestTime':locationLate,
+          'Frequency':frequency,
+          'CustomerName':customerName,
+          'ProjectedDistance':projectedDistance,
+          'ProjectedTimeDriven':projectedTimeDriven,
+          'ProjectedBreaks':rawBreaks!==''?rawBreaks:0,
+          'ProjectedBreakTime':rawBreakTime!==''?rawBreakTime:0,
+          'UdfString1':udf1,
+          'UdfString2':udf2
         });
       });
     });
@@ -5864,11 +5938,12 @@ function buildOutputFileRows(routeIdSet=null){
       const weight=totalWeightForOrder(order)||tWeight(stop);
       const variable=variableServiceSecondsForOutput(order,stop);
       const fixed=fixedServiceSecondsForOutput(order,stop);
+      const locationKey=order.locationKey||stop.locationKey||order.shipToId||stop.shipToId||'';
       rows.push({
         'District':order.district||stop.district||'',
-        'Region Code':outputRegionCode||sval(rawField(order,['Region_Code','Region Code','REGION_CODE','Region'])),
+        'Region_Code':outputRegionCode||sval(rawField(order,['Region_Code','Region Code','REGION_CODE','Region'])),
         'Route':'',
-        'Customer':order.locationKey||stop.locationKey||order.customerNumber||stop.customerNumber||order.shipToId||stop.shipToId||'',
+        'Customer':order.customerNumber||stop.customerNumber||order.shipToId||stop.shipToId||locationKey,
         'Sequence':'',
         'Order_number':order.orderNumber||stop.orderNumber||'',
         'Parent Account':order.parentCustomer||sval(rawField(order,['PARENT_CUSTOMER','Parent Customer','ParentCustomer','Parent Account','ParentAccount','PARENT_ACCOUNT']))||order.alternativeCustomerNumber||'',
@@ -5879,34 +5954,44 @@ function buildOutputFileRows(routeIdSet=null){
         'serviceDurationPerCaseInSeconds':cases?parseFloat((variable/cases).toFixed(6)):0,
         'ServiceDuration':fixed,
         'FixedserviceDuration':variable+fixed,
-        'udfString4':order.orderCodes||sval(rawField(order,['Order Codes','OrderCodes','ORDER_CODES'])),
+        'udfString4':order.orderCodes||sval(rawField(order,['Order Codes','OrderCodes','ORDER_CODES','udfString4','UDFString4']))||'',
         'truckKey':'',
         'driverKey':'',
         'routename':'',
         'routeprojectedDepartedDate':'',
         'locationType':'CUSTOMER',
         'stoptype':orderCount(stop),
-        'Measure1':cases,
-        'Measure2':parseFloat(cube.toFixed(2)),
-        'Measure3':parseFloat(weight.toFixed(2)),
-        'udfString3':order.alternativeCustomerNumber||sval(rawField(order,['Alternative customer number','Alternative Customer Number','AlternativeCustomerNumber'])),
-        'Standard Route':order.standardRoute||stop.standardRoute||'',
-        'Standard Sequence':order.standardSequence||stop.standardSequence||'',
-        'Profit':nval(order.profit),
-        'PARENT_CUSTOMER':order.parentCustomer||stop.parentCustomer||'',
-        'LocationKey':order.locationKey||stop.locationKey||'',
-        'ActivityWindowEarliestTime':order.activityWindowEarliestTimeRaw||order.activityWindowEarliestTime||'',
-        'ActivityWindowLatestTime':order.activityWindowLatestTimeRaw||order.activityWindowLatestTime||'',
-        'LocationWindowEarliestTime':order.locationWindowEarliestTime||'',
-        'LocationWindowLatestTime':order.locationWindowLatestTime||'',
-        'Frequency':order.frequency||''
+        'measure1':cases,
+        'measure2':parseFloat(cube.toFixed(2)),
+        'measure3':parseFloat(weight.toFixed(2)),
+        'udfString3':order.alternativeCustomerNumber||sval(rawField(order,['Alternative customer number','Alternative Customer Number','AlternativeCustomerNumber','udfString3','UDFString3']))||'',
+        'Requirements':outputRequirements(order,stop,null),
+        'LocationKey':locationKey,
+        'Address':order.address||stop.address||outputRawValue(order,stop,['Address','Street Name','Street','ShipStreet'])||'',
+        'ZipCode':order.zip||stop.zip||outputRawValue(order,stop,['ZipCode','Zipcode','Zip','ZIP'])||'',
+        'City':order.city||stop.city||outputRawValue(order,stop,['City'])||'',
+        'State':order.state||stop.state||outputRawValue(order,stop,['State'])||'',
+        'Country':order.country||stop.country||outputRawValue(order,stop,['Country'])||'US',
+        'Latitude':Number.isFinite(parseFloat(order.lat))?parseFloat(order.lat):(Number.isFinite(parseFloat(stop.lat))?parseFloat(stop.lat):''),
+        'Longitude':Number.isFinite(parseFloat(order.lng))?parseFloat(order.lng):(Number.isFinite(parseFloat(stop.lng))?parseFloat(stop.lng):''),
+        'ActivityWindowEarliestTime':order.activityWindowEarliestTimeRaw||order.activityWindowEarliestTime||stop.activityWindowEarliestTimeRaw||stop.activityWindowEarliestTime||outputRawValue(order,stop,['ActivityWindowEarliestTime','Activity Window Earliest Time'])||'',
+        'ActivityWindowLatestTime':order.activityWindowLatestTimeRaw||order.activityWindowLatestTime||stop.activityWindowLatestTimeRaw||stop.activityWindowLatestTime||outputRawValue(order,stop,['ActivityWindowLatestTime','Activity Window Latest Time'])||'',
+        'LocationWindowEarliestTime':order.locationWindowEarliestTime||stop.locationWindowEarliestTime||outputRawValue(order,stop,['LocationWindowEarliestTime','Location Window Earliest Time'])||'',
+        'LocationWindowLatestTime':order.locationWindowLatestTime||stop.locationWindowLatestTime||outputRawValue(order,stop,['LocationWindowLatestTime','Location Window Latest Time'])||'',
+        'Frequency':(order.frequency??stop.frequency??outputRawValue(order,stop,['Frequency']))||'',
+        'CustomerName':order.customerName||stop.customerName||outputRawValue(order,stop,['CustomerName','Customer Name','Customer','Company'])||'',
+        'ProjectedDistance':0,
+        'ProjectedTimeDriven':0,
+        'ProjectedBreaks':0,
+        'ProjectedBreakTime':0,
+        'UdfString1':outputRawValue(order,stop,['UdfString1','UDFString1','UDF String 1'])||'',
+        'UdfString2':outputRawValue(order,stop,['UdfString2','UDFString2','UDF String 2'])||''
       });
     });
   });
 
   return rows;
 }
-
 
 function cleanTxtCell(value){
   if(value===null||value===undefined)return '';
@@ -8165,7 +8250,7 @@ function exportExcel(options={}){
 
   // Tab 7: Output File (production-style session output)
   const outputFileRows=buildOutputFileRows(routeIdSet);
-  const outputHeaders=['District','Region Code','Route','Customer','Sequence','Order_number','Parent Account','EarliestDate','LatestDate','projectedArrivalDate','projectedBegunDate','serviceDurationPerCaseInSeconds','ServiceDuration','FixedserviceDuration','udfString4','truckKey','driverKey','routename','routeprojectedDepartedDate','locationType','stoptype','Measure1','Measure2','Measure3','udfString3','Standard Route','Standard Sequence','Profit','PARENT_CUSTOMER','LocationKey','ActivityWindowEarliestTime','ActivityWindowLatestTime','LocationWindowEarliestTime','LocationWindowLatestTime','Frequency'];
+  const outputHeaders=['District','Region_Code','Route','Customer','Sequence','Order_number','Parent Account','EarliestDate','LatestDate','projectedArrivalDate','projectedBegunDate','serviceDurationPerCaseInSeconds','ServiceDuration','FixedserviceDuration','udfString4','truckKey','driverKey','routename','routeprojectedDepartedDate','locationType','stoptype','measure1','measure2','measure3','udfString3','Requirements','LocationKey','Address','ZipCode','City','State','Country','Latitude','Longitude','ActivityWindowEarliestTime','ActivityWindowLatestTime','LocationWindowEarliestTime','LocationWindowLatestTime','Frequency','CustomerName','ProjectedDistance','ProjectedTimeDriven','ProjectedBreaks','ProjectedBreakTime','UdfString1','UdfString2'];
   const outputWs=XLSX.utils.json_to_sheet(outputFileRows.length?outputFileRows:[Object.fromEntries(outputHeaders.map(h=>[h,'']))],{header:outputHeaders});
   if(!selectedOnly)applyPublishedHighlight(outputWs,outputHeaders,outputFileRows);
   XLSX.utils.book_append_sheet(wb,outputWs,'Output File');
