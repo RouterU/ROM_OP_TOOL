@@ -183,7 +183,9 @@ body{font-family:'Sora',sans-serif;background:#0f1117;color:#e8e6e0;height:100vh
 
 
 /* Route Manifest Modal */
-.manifest-modal{width:1320px;max-width:98vw;max-height:94vh;}
+.manifest-modal{width:1600px;max-width:99vw;max-height:97vh;}
+#route-manifest-modal .manifest-modal{height:94vh;display:flex;flex-direction:column;}
+#route-manifest-modal .manifest-route-list{max-height:none;flex:1;min-height:0;}
 .manifest-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px;}
 .manifest-stat{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:8px;text-align:center;}
 .manifest-stat .val{font-family:'DM Mono',monospace;font-size:15px;color:var(--text1);font-weight:600;}
@@ -998,6 +1000,7 @@ let routeSortDirection="desc"; // high-to-low by default
 let activeRouteFilterId=null;
 let activeStopFilterId=null;
 let mapRouteFilterActiveId=null;
+let mapRouteFilterIds=new Set();
 let mapRouteFilterSnapshot=null;
 let mapDepotFilterKey=null;
 let mapDepotFilterSnapshot=null;
@@ -1291,22 +1294,22 @@ function durationToMinutes(value){
 }
 function windowStatusForStop(stop, arrive){
   if(!stop)return {status:'',label:'',waitMins:0,adjustedArrive:arrive};
-  const early=timeToMinutes(stop.earliestTimeWindow);
-  const late=timeToMinutes(stop.latestTimeWindow);
+  const early=timeToMinutes(stop.earliestTimeWindow), late=timeToMinutes(stop.latestTimeWindow);
   let adjusted=arrive, wait=0, status='OK', label='On Time';
-  if(early!==null && adjusted<early){
-    wait=early-adjusted;
-    adjusted=early;
-    status='WAIT';
-    label='Wait '+fmtMinutes(wait);
+  if(early===null&&late===null)return {status:'',label:'No Window',waitMins:0,adjustedArrive:arrive};
+  // Overnight windows such as 21:00–10:00 span midnight. Early-morning
+  // arrivals are inside the window that opened the prior calendar day; do not
+  // manufacture a wait until 21:00 on the current day.
+  if(early!==null&&late!==null&&late<early){
+    const tod=((adjusted%1440)+1440)%1440;
+    if(tod>=early||tod<=late)return {status:'OK',label:'On Time',waitMins:0,adjustedArrive:adjusted};
+    wait=early-tod;adjusted+=wait;return {status:'WAIT',label:'Wait '+fmtMinutes(wait),waitMins:wait,adjustedArrive:adjusted};
   }
-  if(late!==null && adjusted>late){
-    status='LATE';
-    label='Outside Window';
-  }
-  if(early===null && late===null){status=''; label='No Window';}
+  if(early!==null&&adjusted<early){wait=early-adjusted;adjusted=early;status='WAIT';label='Wait '+fmtMinutes(wait);}
+  if(late!==null&&adjusted>late){status='LATE';label='Outside Window';}
   return {status,label,waitMins:wait,adjustedArrive:adjusted};
 }
+
 function routeTotalMinutes(routeId){
   const scenarioHours=typeof scenarioFinalRouteMetric==='function'?scenarioFinalRouteMetric(routeId,'hours'):null;
   if(Number.isFinite(scenarioHours))return scenarioHours*60;
@@ -1483,6 +1486,8 @@ function snapshotCurrentMapVisibility(){
 function restoreMapRouteFilter(){
   if(!mapRouteFilterSnapshot){
     mapRouteFilterActiveId=null;
+    mapRouteFilterIds.clear();
+    renderStats();
     renderMap();
     return;
   }
@@ -1494,34 +1499,44 @@ function restoreMapRouteFilter(){
   visibleDepotIds.clear();
   (mapRouteFilterSnapshot.visibleDepotIds||[]).forEach(id=>visibleDepotIds.add(id));
   mapRouteFilterActiveId=null;
+  mapRouteFilterIds.clear();
   mapRouteFilterSnapshot=null;
   activeRouteFilterId=null;
+  renderStats();
   renderRoutes();
   renderMap();
   showToast('Map route filter cleared');
 }
-function filterMapToRoute(routeId){
-  const route=routes.find(r=>r.id===routeId);
-  if(!route)return;
-  if(mapRouteFilterActiveId===routeId){
-    restoreMapRouteFilter();
-    return;
-  }
-  if(!mapRouteFilterActiveId){
-    mapRouteFilterSnapshot=snapshotCurrentMapVisibility();
-  }
-  mapRouteFilterActiveId=routeId;
-  activeRouteFilterId=routeId;
-  mapCleared=true;
-  visibleRouteIds.clear();
-  visibleRouteIds.add(routeId);
-  visibleStopIds.clear();
-  stops.filter(s=>s.routeId===routeId).forEach(s=>visibleStopIds.add(s.id));
-  renderRoutes();
-  renderMap();
-  fitRouteToMap(routeId);
-  showToast(`Map filtered to ${routeDisplayName(route)}. Click the map to clear.`);
+function applyMapRouteFilterSet(routeIds){
+  const ids=[...new Set((routeIds||[]).filter(id=>routes.some(r=>r.id===id)))];
+  if(!ids.length){restoreMapRouteFilter();return;}
+  if(!mapRouteFilterSnapshot)mapRouteFilterSnapshot=snapshotCurrentMapVisibility();
+  mapRouteFilterIds=new Set(ids);
+  mapRouteFilterActiveId=ids.length===1?ids[0]:'__MULTI__';
+  activeRouteFilterId=ids.length===1?ids[0]:null;
+  mapCleared=true;visibleRouteIds.clear();visibleStopIds.clear();
+  ids.forEach(id=>{visibleRouteIds.add(id);stops.filter(s=>s.routeId===id).forEach(s=>visibleStopIds.add(s.id));});
+  renderStats();renderRoutes();renderMap();
+  if(ids.length===1)fitRouteToMap(ids[0]);else fitRoutesToMap(ids);
+  showToast(`Map filtered to ${ids.length} route${ids.length===1?'':'s'}. Shift-click routes to add/remove; click map to clear.`);
 }
+function filterMapToRoute(routeId){
+  if(mapRouteFilterIds.size===1&&mapRouteFilterIds.has(routeId)){restoreMapRouteFilter();return;}
+  applyMapRouteFilterSet([routeId]);
+}
+function toggleMapRouteFilter(routeId){
+  let ids=new Set(mapRouteFilterIds);
+  if(!ids.size&&mapRouteFilterActiveId&&mapRouteFilterActiveId!=='__MULTI__')ids.add(mapRouteFilterActiveId);
+  if(ids.has(routeId))ids.delete(routeId);else ids.add(routeId);
+  if(!ids.size){restoreMapRouteFilter();return;}
+  applyMapRouteFilterSet([...ids]);
+}
+function routeHeaderClick(event,routeId){
+  if(event?.shiftKey){event.preventDefault();event.stopPropagation();toggleMapRouteFilter(routeId);return;}
+  applyMapRouteFilterSet([routeId]);
+  openRouteDetail(routeId);
+}
+
 function routesRunningFromDepot(depotKey){
   const needle=normalizeKey(depotKey).toUpperCase();
   if(!needle)return [];
@@ -1708,17 +1723,20 @@ function render(){
 }
 
 function renderStats(){
-  const asgn=stops.filter(s=>s.routeId).length;
-  const ua=stops.filter(s=>!s.routeId).length;
-  const tc=stops.reduce((a,s)=>a+tCases(s),0);
-  const tw=stops.reduce((a,s)=>a+tWeight(s),0);
-  const tcu=stops.reduce((a,s)=>a+tCube(s),0);
+  const filteredIds=mapRouteFilterIds&&mapRouteFilterIds.size?new Set(mapRouteFilterIds):(activeRouteFilterId?new Set([activeRouteFilterId]):null);
+  const statStops=filteredIds?stops.filter(s=>s.routeId&&filteredIds.has(s.routeId)):stops;
+  const statRoutes=filteredIds?routes.filter(r=>filteredIds.has(r.id)):routes;
+  const asgn=statStops.filter(s=>s.routeId).length;
+  const ua=filteredIds?0:stops.filter(s=>!s.routeId).length;
+  const tc=statStops.reduce((a,s)=>a+tCases(s),0);
+  const tw=statStops.reduce((a,s)=>a+tWeight(s),0);
+  const tcu=statStops.reduce((a,s)=>a+tCube(s),0);
   document.getElementById('stats-bar').innerHTML=`
-    <div class="stat"><div class="stat-val">${routes.length}</div><div class="stat-lbl">Routes</div></div>
+    <div class="stat"><div class="stat-val">${statRoutes.length}</div><div class="stat-lbl">Routes${filteredIds?' Filtered':''}</div></div>
     <div class="stat"><div class="stat-val">${asgn}</div><div class="stat-lbl">Assigned</div></div>
     <div class="stat"><div class="stat-val">${ua}</div><div class="stat-lbl">Unassigned</div></div>
-    <div class="stat"><div class="stat-val">${trucks.length}</div><div class="stat-lbl">Trucks</div></div>
-    <div class="stat"><div class="stat-val">${depotLocations.length}</div><div class="stat-lbl">Depots</div></div>
+    <div class="stat"><div class="stat-val">${filteredIds?'—':trucks.length}</div><div class="stat-lbl">Trucks</div></div>
+    <div class="stat"><div class="stat-val">${filteredIds?'—':depotLocations.length}</div><div class="stat-lbl">Depots</div></div>
     <div class="stat"><div class="stat-val">${tc.toLocaleString()}</div><div class="stat-lbl">Cases</div></div>
     <div class="stat"><div class="stat-val">${Math.round(tw).toLocaleString()}</div><div class="stat-lbl">Weight</div></div>
     <div class="stat"><div class="stat-val">${tcu.toFixed(1)}</div><div class="stat-lbl">Cube</div></div>
@@ -1728,8 +1746,7 @@ function renderStats(){
       <button class="btn" style="padding:3px 8px;font-size:10px;" onclick="saveWorkSession()" title="Download the current routing session as a local JSON backup file">Save Work</button>
       <button class="btn" style="padding:3px 8px;font-size:10px;" onclick="loadSavedWork()" title="Load a previously saved RouteDesk session JSON file">Load Saved Work</button>
       <input type="file" id="session-file-in" accept=".json,application/json" style="display:none" onchange="handleSessionFileSelect(this)"/>
-    </div>
-  `;
+    </div>`;
 }
 
 function sortedRoutesForDisplay(){
@@ -1810,7 +1827,7 @@ function renderRoutes(){
     const dname=r.driverFirstName?(r.driverFirstName+' '+(r.driverLastName||'')).trim():(drv?drv.name:'—');
     const isOpen=expanded.has(r.id);
     return`<div class="route-card" id="rc-${r.id}" draggable="true" ondragstart="onRouteDragStart(event,'${r.id}')" ondragend="onDragEnd()" onmouseenter="highlightRoute('${r.id}')" onmouseleave="clearMapHighlight()">
-      <div class="r-header" onclick="openRouteDetail('${r.id}')">
+      <div class="r-header" onclick="routeHeaderClick(event,'${r.id}')" title="Click to filter this route on the map; Shift-click to add/remove routes from the map filter">
         <div class="r-colorbar" style="background:${color}"></div>
         <div class="r-info">
           <div class="r-name">${escapeHtml(routeDisplayName(r))}${r.published?'<span style="display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;background:rgba(62,207,142,.16);border:1px solid rgba(62,207,142,.45);color:var(--success);font-size:9px;font-weight:800;box-shadow:0 3px 10px rgba(0,0,0,.35);vertical-align:middle;">Published</span>':''}</div>
@@ -6043,9 +6060,16 @@ function scenarioCapacityStatus(route,customerStops=null){
   return {load,cap,cubeOver,weightOver,ok:cubeOver<=1e-6&&weightOver<=1e-6,known:cap.cube>0||cap.weight>0};
 }
 function scenarioCapacityOk(route,customerStops=null){return scenarioCapacityStatus(route,customerStops).ok;}
-function scenarioOrderFromRow(row){
-  return {orderNumber:sval(gcLoose(row,['OrderKey']))||uid(),locationKey:sval(gcLoose(row,['LocationKey'])),customerName:sval(gcLoose(row,['Customer','Company'])),cases:scenarioCleanFormula(gcLoose(row,['Cases'])),cube:scenarioCleanFormula(gcLoose(row,['Cube Max Capacity','CubeMaxCapacity','Cube'])),weight:scenarioCleanFormula(gcLoose(row,['Weight Max Capacity','WeightMaxCapacity','Weight'])),ignoreType:sval(gcLoose(row,['Ignore'])),preferredResourceKey:sval(gcLoose(row,['PreferredResource'])),preferredRouteSequence:sval(gcLoose(row,['Pref Rt Position'])),earliestRaw:sval(gcLoose(row,['EarlyDateTime'])),latestRaw:sval(gcLoose(row,['LateDateTime'])),plannedArrivedRaw:sval(gcLoose(row,['Planned Arrived Date'])),plannedBegunRaw:sval(gcLoose(row,['Planned Begun Date'])),plannedCompletedRaw:sval(gcLoose(row,['Planned Completed Date'])),plannedDepartedRaw:sval(gcLoose(row,['Planned Departed Date'])),stopServiceSeconds:scenarioDurationSeconds(gcLoose(row,['StopServiceTime'])),waitSeconds:scenarioDurationSeconds(gcLoose(row,['WaitTime'])),distanceMile:scenarioCleanFormula(gcLoose(row,['DistanceMile'])),driveSeconds:scenarioDurationSeconds(gcLoose(row,['DriveTime'])),raw:{...row}};
+function scenarioNormalizeImportedWindowPair(earlyRaw,lateRaw){
+  const early=sval(earlyRaw),late=sval(lateRaw);let e=scenarioParseDate(early),l=scenarioParseDate(late);
+  if(e&&l&&l.getTime()<e.getTime()){e=new Date(e.getTime()-86400000);return {early:e.toISOString(),late};}
+  return {early,late};
 }
+function scenarioOrderFromRow(row){
+  const wp=scenarioNormalizeImportedWindowPair(gcLoose(row,['EarlyDateTime']),gcLoose(row,['LateDateTime']));
+  return {orderNumber:sval(gcLoose(row,['OrderKey']))||uid(),locationKey:sval(gcLoose(row,['LocationKey'])),customerName:sval(gcLoose(row,['Customer','Company'])),cases:scenarioCleanFormula(gcLoose(row,['Cases'])),cube:scenarioCleanFormula(gcLoose(row,['Cube Max Capacity','CubeMaxCapacity','Cube'])),weight:scenarioCleanFormula(gcLoose(row,['Weight Max Capacity','WeightMaxCapacity','Weight'])),ignoreType:sval(gcLoose(row,['Ignore'])),preferredResourceKey:sval(gcLoose(row,['PreferredResource'])),preferredRouteSequence:sval(gcLoose(row,['Pref Rt Position'])),earliestRaw:wp.early,latestRaw:wp.late,plannedArrivedRaw:sval(gcLoose(row,['Planned Arrived Date'])),plannedBegunRaw:sval(gcLoose(row,['Planned Begun Date'])),plannedCompletedRaw:sval(gcLoose(row,['Planned Completed Date'])),plannedDepartedRaw:sval(gcLoose(row,['Planned Departed Date'])),stopServiceSeconds:scenarioDurationSeconds(gcLoose(row,['StopServiceTime'])),waitSeconds:scenarioDurationSeconds(gcLoose(row,['WaitTime'])),distanceMile:scenarioCleanFormula(gcLoose(row,['DistanceMile'])),driveSeconds:scenarioDurationSeconds(gcLoose(row,['DriveTime'])),raw:{...row}};
+}
+
 function scenarioRecalcStop(stop){
   const os=Array.isArray(stop.orders)?stop.orders:[];
   stop.dryCases=os.reduce((a,o)=>a+(parseFloat(o.cases)||0),0); stop.coolerCases=0;stop.frozenCases=0;stop.pkgCases=0;
@@ -6488,7 +6512,7 @@ function scenarioValidateRouteRuntimeLimits(opts){
   });
   return violations;
 }
-function scenarioStopWindow(stop){const os=stop.orders||[];const early=os.map(o=>scenarioEpochMinutes(o.earliestRaw)).filter(Number.isFinite),late=os.map(o=>scenarioEpochMinutes(o.latestRaw)).filter(Number.isFinite);return {early:early.length?Math.min(...early):scenarioEpochMinutes(stop.earliestTimeWindowRaw),late:late.length?Math.max(...late):scenarioEpochMinutes(stop.latestTimeWindowRaw)};}
+function scenarioStopWindow(stop){const os=stop.orders||[];const early=os.map(o=>scenarioEpochMinutes(o.earliestRaw)).filter(Number.isFinite),late=os.map(o=>scenarioEpochMinutes(o.latestRaw)).filter(Number.isFinite);let e=early.length?Math.min(...early):scenarioEpochMinutes(stop.earliestTimeWindowRaw),l=late.length?Math.max(...late):scenarioEpochMinutes(stop.latestTimeWindowRaw);if(Number.isFinite(e)&&Number.isFinite(l)&&l<e)e-=1440;return {early:e,late:l};}
 function scenarioEvaluateOrderedRoute(route,rs,startEpoch){
   const layoverRoute=scenarioRouteIsLayover(route);
   if(!rs.length)return {miles:0,hours:0,waitMinutes:0,maxStopWaitMinutes:0,onTime:0,windowStops:0,late:0,startEpoch,endEpoch:startEpoch,stops:[],isLayover:layoverRoute,segmentHours:[]};
@@ -7513,7 +7537,7 @@ function runScenarioModel(){
   }
   removed.targetedRepair=targetedRepair;
   const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
-  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'Consistent Targeted Repair Local Search v19',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'Window-Aware Targeted Repair Local Search v20',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
   scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
 }
 
@@ -7525,7 +7549,7 @@ function openScenarioAfterActionReport(){
   const summary=document.getElementById('scenario-report-summary');
   summary.innerHTML=`<div class="scenario-kpi-grid"><div class="scenario-kpi"><div class="v">${scenarioFmt(o.cases,0)} → ${scenarioFmt(m.cases,0)}</div><div class="l">Cases Planned</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.shippedCases,0)} → ${scenarioFmt(m.shippedCases,0)}</div><div class="l">Shipped Cases</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.miles)} → ${scenarioFmt(m.miles)}</div><div class="l">Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.hours)} → ${scenarioFmt(m.hours)}</div><div class="l">Route Hours</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(o.onTimePct)}% → ${scenarioFmt(m.onTimePct)}%</div><div class="l">Planned On Time</div></div></div>${r.mode==='full'?`<div class="scenario-note" style="border-color:${verdictColor};margin-bottom:8px;"><strong style="color:${verdictColor};">MODEL RESULT: ${escapeHtml(v.verdict||'REVIEW')}</strong> &nbsp; Freight Retention after requested levers: <strong>${scenarioFmt(v.freightRetentionPct??100,1)}%</strong>. ${r.removed.optimizerReverted?'The Do-No-Harm gate rejected the optimizer-created route changes and preserved the post-lever incumbent solution.':''}</div>`:''}<div class="scenario-note"><strong>${r.mode==='lite'?'Lite ReOp':'Model'} actions:</strong> ${r.optimizerVersion?escapeHtml(r.optimizerVersion)+'. ':''}${r.removed.localSequenceMoves?`${r.removed.localSequenceMoves} accepted local sequence improvement(s). `:''}${r.removed.network?`Overflow pool extracted ${r.removed.network.extractedStops||0} stop(s), placed ${r.removed.network.placedStops||0}, moved ${r.removed.network.movedStops||0} between routes, and left ${r.removed.network.unassignedStops||0} stop(s) unassigned after network placement. `:''}${r.removed.optimizerReverted&&r.removed.optimizerAttempt?`Optimizer attempt was rejected by the service-quality gate; attempted network changes are diagnostic only and are not included in the final modeled KPIs. `:''}${r.removed.targetedRepair?`Targeted feasibility repair reviewed ${r.removed.targetedRepair.routesReviewed||0} violating route(s), moved ${r.removed.targetedRepair.movedStops||0} stop(s), made ${r.removed.targetedRepair.sequenceRepairs||0} sequence repair(s) and ${r.removed.targetedRepair.dispatchRepairs||0} dispatch repair(s); ${r.removed.targetedRepair.reverted?'the repair was reverted by the service-quality gate':`${r.removed.targetedRepair.remainingRuntime||0} runtime / ${r.removed.targetedRepair.remainingCapacity||0} capacity violation(s) remain`}. `:''}${r.removed.removedOrders||0} order line(s) / ${scenarioFmt(r.removed.removedCases||0,0)} cases moved to Unassigned. Route Lock ${r.options.removeRouteLock?'removed':'retained'}; Sequence Lock ${r.options.removeSequenceLock?'removed':'retained'}; Assigned Customer Depot ${r.options.keepAssignedDepot===false?'cross-depot moves allowed':'kept with original depot'}; Miles optimization ${r.options.optMiles?'on':'off'}; Time optimization ${r.options.optTime?'on':'off'}; Dispatch optimization ${r.options.optDispatch?'on':'off'}; Allowed Wait ${scenarioFmt(r.options.allowedWaitMinutes??5,0)} min/stop target; Route Run Time ${r.options.minRouteHours?`min ${scenarioFmt(r.options.minRouteHours,2)}h`:'no min'} / ${r.options.maxRouteHours?`max ${scenarioFmt(r.options.maxRouteHours,2)}h`:'no max'}.</div>`;
   const freightRetentionOriginal=100,freightRetentionModeled=o.shippedCases?m.shippedCases/o.shippedCases*100:100;
-  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',x=>scenarioFmt(x,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',x=>scenarioFmt(x,2),false)}${scenarioReportMetric('Shipped Cases','shippedCases',x=>scenarioFmt(x,0),false)}<div class="scenario-report-row"><div><strong>Freight Retention %</strong></div><div>100.0%</div><div>${scenarioFmt(freightRetentionModeled,1)}%</div><div class="${freightRetentionModeled>=99.9?'scenario-delta-good':'scenario-delta-bad'}">${scenarioFmt(freightRetentionModeled-100,1)}%</div></div>${scenarioReportMetric('Routes Used','routesUsed',x=>scenarioFmt(x,0),true)}${scenarioReportMetricNeutral('Empty Routes','emptyRoutes',x=>scenarioFmt(x,0))}${scenarioReportMetric('Miles Ran','miles',x=>scenarioFmt(x,1),true)}${scenarioReportMetric('Hours Ran','hours',x=>scenarioFmt(x,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',x=>scenarioFmt(x,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',x=>scenarioFmt(x,1)+'%',false)}${scenarioReportMetric('Wait Time (HH:MM:SS)','waitMinutes',x=>scenarioFormatHMSFromMinutes(x),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">V19 uses one authoritative final solution state for the route window, After Action KPIs, and route-level export metrics. It preserves imported routes as the incumbent and protects service quality before accepting efficiency changes. Post-lever timing retains imported planned arrivals/wait until the optimizer actually changes a route. With equal late-stop performance, optimizer moves cannot increase route wait beyond rounding drift; fixing late stops permits only a small bounded wait tradeoff. Local sequence, route, and dispatch changes are kept only when they improve higher-priority operational outcomes. Unassigned remains the final fallback after feasible route placement attempts.${r.removed.runtimeViolations?.length?` <strong>Runtime review:</strong> ${escapeHtml(r.removed.runtimeViolations.join(' | '))}`:''}${r.removed.capacityViolations?.length?` <strong>Capacity review:</strong> ${escapeHtml(r.removed.capacityViolations.join(' | '))}`:''}${r.removed.waitReview?` <strong>Wait review:</strong> ${r.removed.waitReview.stopsOver||0} stop(s) above the ${scenarioFmt(r.options.allowedWaitMinutes??5,0)}-minute target; maximum modeled wait ${scenarioFmt(r.removed.waitReview.maxWait||0,1)} min.`:''}</div>`;
+  document.getElementById('scenario-report-body').innerHTML=`<div class="scenario-report-table" style="margin-top:10px;"><div class="scenario-report-row header"><div>KPI</div><div>Original</div><div>Modeled</div><div>Difference</div></div>${scenarioReportMetric('Cases Per Mile','casesPerMile',x=>scenarioFmt(x,2),false)}${scenarioReportMetric('Cases Per Man Hour','casesPerManHour',x=>scenarioFmt(x,2),false)}${scenarioReportMetric('Shipped Cases','shippedCases',x=>scenarioFmt(x,0),false)}<div class="scenario-report-row"><div><strong>Freight Retention %</strong></div><div>100.0%</div><div>${scenarioFmt(freightRetentionModeled,1)}%</div><div class="${freightRetentionModeled>=99.9?'scenario-delta-good':'scenario-delta-bad'}">${scenarioFmt(freightRetentionModeled-100,1)}%</div></div>${scenarioReportMetric('Routes Used','routesUsed',x=>scenarioFmt(x,0),true)}${scenarioReportMetricNeutral('Empty Routes','emptyRoutes',x=>scenarioFmt(x,0))}${scenarioReportMetric('Miles Ran','miles',x=>scenarioFmt(x,1),true)}${scenarioReportMetric('Hours Ran','hours',x=>scenarioFmt(x,1),true)}${scenarioReportMetric('Stops Planned','stopsPlanned',x=>scenarioFmt(x,0),false)}${scenarioReportMetric('On Time Planned Delivery %','onTimePct',x=>scenarioFmt(x,1)+'%',false)}${scenarioReportMetric('Wait Time (HH:MM:SS)','waitMinutes',x=>scenarioFormatHMSFromMinutes(x),true)}${expenseRows}</div><div class="scenario-help" style="margin-top:8px;">V20 uses date-aware overnight delivery windows and one authoritative final solution state for the route window, After Action KPIs, and route-level export metrics. It preserves imported routes as the incumbent and protects service quality before accepting efficiency changes. Post-lever timing retains imported planned arrivals/wait until the optimizer actually changes a route. With equal late-stop performance, optimizer moves cannot increase route wait beyond rounding drift; fixing late stops permits only a small bounded wait tradeoff. Local sequence, route, and dispatch changes are kept only when they improve higher-priority operational outcomes. Unassigned remains the final fallback after feasible route placement attempts.${r.removed.runtimeViolations?.length?` <strong>Runtime review:</strong> ${escapeHtml(r.removed.runtimeViolations.join(' | '))}`:''}${r.removed.capacityViolations?.length?` <strong>Capacity review:</strong> ${escapeHtml(r.removed.capacityViolations.join(' | '))}`:''}${r.removed.waitReview?` <strong>Wait review:</strong> ${r.removed.waitReview.stopsOver||0} stop(s) above the ${scenarioFmt(r.options.allowedWaitMinutes??5,0)}-minute target; maximum modeled wait ${scenarioFmt(r.removed.waitReview.maxWait||0,1)} min.`:''}</div>`;
   document.getElementById('scenario-report-modal').style.display='flex';
 }
 
