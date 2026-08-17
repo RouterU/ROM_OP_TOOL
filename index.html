@@ -1002,6 +1002,8 @@ let activeStopFilterId=null;
 let mapRouteFilterActiveId=null;
 let mapRouteFilterIds=new Set();
 let mapRouteFilterSnapshot=null;
+let mapRouteMultiSelectIds=new Set();
+let mapRouteMultiSelectActive=false;
 let mapDepotFilterKey=null;
 let mapDepotFilterSnapshot=null;
 let measureFromStopId=null, measureLine=null;
@@ -1518,7 +1520,7 @@ function applyMapRouteFilterSet(routeIds){
   ids.forEach(id=>{visibleRouteIds.add(id);stops.filter(s=>s.routeId===id).forEach(s=>visibleStopIds.add(s.id));});
   renderStats();renderRoutes();renderMap();
   if(ids.length===1)fitRouteToMap(ids[0]);else fitRoutesToMap(ids);
-  showToast(`Map filtered to ${ids.length} route${ids.length===1?'':'s'}. Shift-click routes to add/remove; click map to clear.`);
+  showToast(`Map filtered to ${ids.length} route${ids.length===1?'':'s'}. Ctrl/Shift-click route lines on the map to build another multi-route filter; click map to clear.`);
 }
 function filterMapToRoute(routeId){
   if(mapRouteFilterIds.size===1&&mapRouteFilterIds.has(routeId)){restoreMapRouteFilter();return;}
@@ -1531,6 +1533,64 @@ function toggleMapRouteFilter(routeId){
   if(!ids.size){restoreMapRouteFilter();return;}
   applyMapRouteFilterSet([...ids]);
 }
+function updateMapRouteMultiSelectStyles(){
+  if(!mapRouteMultiSelectActive)return;
+  routes.forEach((r,ri)=>{
+    const line=polylines[r.id];
+    if(!line)return;
+    const selected=mapRouteMultiSelectIds.has(r.id);
+    line.setStyle({
+      color:COLORS[ri%COLORS.length],
+      weight:selected?8:3,
+      opacity:selected?1:.28,
+      dashArray:selected?null:'5,4'
+    });
+    if(selected&&line.bringToFront)line.bringToFront();
+  });
+}
+function beginOrToggleMapRouteMultiSelect(routeId){
+  // Multi-select is intentionally staged while Ctrl/Shift is held so the
+  // remaining route lines stay visible and can still be clicked.
+  if(!mapRouteMultiSelectActive){
+    mapRouteMultiSelectActive=true;
+    mapRouteMultiSelectIds=new Set(mapRouteFilterIds);
+    if(!mapRouteMultiSelectIds.size&&mapRouteFilterActiveId&&mapRouteFilterActiveId!=='__MULTI__')mapRouteMultiSelectIds.add(mapRouteFilterActiveId);
+  }
+  if(mapRouteMultiSelectIds.has(routeId))mapRouteMultiSelectIds.delete(routeId);
+  else mapRouteMultiSelectIds.add(routeId);
+  updateMapRouteMultiSelectStyles();
+  showToast(`${mapRouteMultiSelectIds.size} route${mapRouteMultiSelectIds.size===1?'':'s'} selected. Keep Ctrl/Shift held and click more routes; release the key to filter.`);
+}
+function commitMapRouteMultiSelect(){
+  if(!mapRouteMultiSelectActive)return;
+  const ids=[...mapRouteMultiSelectIds];
+  mapRouteMultiSelectActive=false;
+  mapRouteMultiSelectIds.clear();
+  if(ids.length)applyMapRouteFilterSet(ids);
+  else restoreMapRouteFilter();
+}
+function cancelMapRouteMultiSelect(){
+  if(!mapRouteMultiSelectActive)return;
+  mapRouteMultiSelectActive=false;
+  mapRouteMultiSelectIds.clear();
+  renderMap();
+}
+function handleMapRouteLineClick(ev,routeId){
+  const original=ev?.originalEvent||{};
+  if(ev&&ev.originalEvent)L.DomEvent.stopPropagation(ev);
+  if(original.ctrlKey||original.metaKey||original.shiftKey){
+    beginOrToggleMapRouteMultiSelect(routeId);
+    return;
+  }
+  // A normal click keeps the existing single-route filter behavior.
+  if(mapRouteMultiSelectActive)cancelMapRouteMultiSelect();
+  filterMapToRoute(routeId);
+}
+window.addEventListener('keyup',e=>{
+  if(!mapRouteMultiSelectActive)return;
+  if(e.key==='Control'||e.key==='Shift'||e.key==='Meta')commitMapRouteMultiSelect();
+});
+window.addEventListener('blur',()=>{if(mapRouteMultiSelectActive)commitMapRouteMultiSelect();});
 function routeHeaderClick(event,routeId){
   if(event?.shiftKey){event.preventDefault();event.stopPropagation();toggleMapRouteFilter(routeId);return;}
   applyMapRouteFilterSet([routeId]);
@@ -2005,12 +2065,13 @@ function renderMap(){
     if(fin&&fin.lat&&fin.lng)points.push([fin.lat,fin.lng]);
     if(points.length<2 || !routeLinesVisible) return;
     polylines[r.id]=L.polyline(points,{color,weight:4,opacity:.72,dashArray:'5,4'}).addTo(map);
-    polylines[r.id].on('click',ev=>{
-      if(ev&&ev.originalEvent)L.DomEvent.stopPropagation(ev);
-      filterMapToRoute(r.id);
-    });
+    polylines[r.id].on('click',ev=>handleMapRouteLineClick(ev,r.id));
     polylines[r.id].on('mouseover',()=>{highlightRoute(r.id); if(polylines[r.id]) polylines[r.id].setStyle({weight:8,opacity:.95});});
-    polylines[r.id].on('mouseout',()=>{clearMapHighlight(); if(polylines[r.id]) polylines[r.id].setStyle({weight:4,opacity:.72});});
+    polylines[r.id].on('mouseout',()=>{
+      clearMapHighlight();
+      if(mapRouteMultiSelectActive)updateMapRouteMultiSelectStyles();
+      else if(polylines[r.id])polylines[r.id].setStyle({weight:4,opacity:.72,dashArray:'5,4'});
+    });
     polylines[r.id].on('contextmenu',ev=>{
       L.DomEvent.preventDefault(ev);
       const original=ev.originalEvent||{};
