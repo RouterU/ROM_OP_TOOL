@@ -1408,9 +1408,21 @@ function setTravelModel(value){
   showToast('Travel model set to '+travelModelLabel());
 }
 function serviceDurationSecondsForStop(stop){
-  // Production Orders fields are stored in seconds.
-  // Route Manifest service time now matches Output File column N (FixedserviceDuration):
-  // variable service time + fixed service time, summed across consolidated orders.
+  // Route Detail imports consolidate many order rows into one physical customer stop.
+  // In Route Detail data, StopServiceTime is a cumulative stop-level duration on the
+  // underlying order rows (the maximum row value represents the full physical stop
+  // service duration). Do NOT repeat the consolidated stop.fixedServiceTime once for
+  // every underlying order, or service time is multiplied by the order count.
+  if(stop?.sourceType==='route-data'){
+    const imported=Math.max(0,
+      parseFloat(stop?.routeData?.stopServiceSeconds)||0,
+      parseFloat(stop?.fixedServiceTime)||0
+    );
+    return imported;
+  }
+
+  // Standard Orders imports retain the original behavior: sum each order's variable
+  // and fixed service components for the consolidated stop.
   const orderRows=Array.isArray(stop?.orders)&&stop.orders.length?stop.orders:[stop];
   return orderRows.reduce((total,order)=>{
     const variable=variableServiceSecondsForOutput(order,stop);
