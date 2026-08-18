@@ -920,10 +920,16 @@ body{background:var(--bg0);color:var(--text1);}
         <h3>Order Types — Ignore</h3>
         <div id="scenario-ignore-values" class="scenario-check-grid"></div>
         <div class="input-row" style="margin-top:9px;margin-bottom:0;">
-          <div class="field"><label>% of Orders</label><input id="scenario-ignore-percent" type="number" min="0" max="100" step="1" value="100" placeholder="100"/></div>
+          <div class="field"><label>Removal Target</label><select id="scenario-ignore-basis"><option value="orders">% of Orders</option><option value="stops">% of Customer Stops</option><option value="cases">% of Cases</option></select></div>
+          <div class="field"><label>Removal %</label><input id="scenario-ignore-percent" type="number" min="0" max="100" step="1" value="100" placeholder="100"/></div>
           <div class="field"><label>Distance Allowance (miles)</label><input id="scenario-ignore-distance" type="number" min="0" step="1" placeholder="Example: 30"/></div>
         </div>
-        <div class="scenario-help">Select zero, one, or multiple values from the imported <strong>Ignore</strong> column. <strong>% of Orders</strong> controls what share of the matching order lines are removed. When the percentage is below 100%, RouteER prioritizes customers beyond the Distance Allowance first, starting with the farthest customer and working back toward the depot until the requested percentage is reached. Blank Distance Allowance still removes the farthest matching orders first.</div>
+        <div class="scenario-help">Choose whether the percentage applies to matching <strong>order lines</strong>, matching <strong>customer stops</strong>, or matching <strong>case volume</strong>. When the percentage is below 100%, RouteER prioritizes customers beyond the Distance Allowance first, starting with the farthest customer and working back toward the depot. Blank Distance Allowance still ranks farthest to nearest.</div>
+      </div>
+      <div class="scenario-card">
+        <h3>Removal Analysis</h3>
+        <div class="scenario-help" style="margin-bottom:8px;">After a Lite ReOp or Full Model, review exactly which customers/order work was removed by the selected scenario levers, including LocationKey, address, cases, original route, distance from depot, and whether the physical stop was fully eliminated.</div>
+        <button class="btn" type="button" onclick="openScenarioRemovalDetails()">View Removal Details</button>
       </div>
       <div class="scenario-card">
         <h3>Minimum Case Count</h3>
@@ -996,12 +1002,23 @@ body{background:var(--bg0);color:var(--text1);}
     <div id="scenario-report-summary"></div>
     <div id="scenario-report-body"></div>
     <div class="modal-actions">
+      <button class="btn" onclick="openScenarioRemovalDetails()">View Removal Details</button>
       <button class="btn success" onclick="exportScenarioAfterActionReport()">Export Report</button>
       <button class="btn" onclick="closeModal('scenario-report-modal')">Close</button>
     </div>
   </div>
 </div>
 
+
+<!-- Scenario Removal Details Modal -->
+<div id="scenario-removal-details-modal" style="display:none" class="modal-overlay">
+  <div class="modal scenario-modal">
+    <h2>Scenario Removal Details</h2>
+    <div id="scenario-removal-details-summary" class="scenario-note" style="margin-bottom:10px;"></div>
+    <div id="scenario-removal-details-body" class="scenario-report-table" style="max-height:62vh;overflow:auto;"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal('scenario-removal-details-modal')">Close</button></div>
+  </div>
+</div>
 
 <script>
 // ============================================================
@@ -6382,7 +6399,7 @@ function scenarioReadOptions(){
   const ignorePercent=Number.isFinite(rawPct)?Math.max(0,Math.min(100,rawPct)):100;
   const rawDist=parseFloat(document.getElementById('scenario-ignore-distance')?.value);
   const ignoreDistanceMiles=Number.isFinite(rawDist)?Math.max(0,rawDist):0;
-  return {ignoreValues:new Set(Array.from(document.querySelectorAll('.scenario-ignore-chk:checked')).map(x=>x.value)),ignorePercent,ignoreDistanceMiles,minCases:Math.max(0,parseFloat(document.getElementById('scenario-min-cases')?.value)||0),windowOpen:Math.max(0,parseFloat(document.getElementById('scenario-window-open')?.value)||0),windowClose:Math.max(0,parseFloat(document.getElementById('scenario-window-close')?.value)||0),ignoreAllWindows:document.getElementById('scenario-ignore-all-windows')?.checked===true,removeRouteLock:document.getElementById('scenario-remove-route-lock')?.checked===true,removeSequenceLock:document.getElementById('scenario-remove-sequence-lock')?.checked===true,keepAssignedDepot:(document.getElementById('scenario-keep-depot')?.value||'yes')!=='no',optMiles:document.getElementById('scenario-opt-miles')?.checked===true,optTime:document.getElementById('scenario-opt-time')?.checked===true,optDispatch:document.getElementById('scenario-opt-dispatch')?.checked===true,allowedWaitMinutes:Math.max(0,parseFloat(document.getElementById('scenario-allowed-wait')?.value ?? '5')||0),minRouteHours:Math.max(0,parseFloat(document.getElementById('scenario-min-route-hours')?.value)||0),maxRouteHours:Math.max(0,parseFloat(document.getElementById('scenario-max-route-hours')?.value)||0),costMile:Math.max(0,parseFloat(document.getElementById('scenario-cost-mile')?.value)||0),costHour:Math.max(0,parseFloat(document.getElementById('scenario-cost-hour')?.value)||0)};
+  return {ignoreValues:new Set(Array.from(document.querySelectorAll('.scenario-ignore-chk:checked')).map(x=>x.value)),ignoreBasis:(document.getElementById('scenario-ignore-basis')?.value||'orders'),ignorePercent,ignoreDistanceMiles,minCases:Math.max(0,parseFloat(document.getElementById('scenario-min-cases')?.value)||0),windowOpen:Math.max(0,parseFloat(document.getElementById('scenario-window-open')?.value)||0),windowClose:Math.max(0,parseFloat(document.getElementById('scenario-window-close')?.value)||0),ignoreAllWindows:document.getElementById('scenario-ignore-all-windows')?.checked===true,removeRouteLock:document.getElementById('scenario-remove-route-lock')?.checked===true,removeSequenceLock:document.getElementById('scenario-remove-sequence-lock')?.checked===true,keepAssignedDepot:(document.getElementById('scenario-keep-depot')?.value||'yes')!=='no',optMiles:document.getElementById('scenario-opt-miles')?.checked===true,optTime:document.getElementById('scenario-opt-time')?.checked===true,optDispatch:document.getElementById('scenario-opt-dispatch')?.checked===true,allowedWaitMinutes:Math.max(0,parseFloat(document.getElementById('scenario-allowed-wait')?.value ?? '5')||0),minRouteHours:Math.max(0,parseFloat(document.getElementById('scenario-min-route-hours')?.value)||0),maxRouteHours:Math.max(0,parseFloat(document.getElementById('scenario-max-route-hours')?.value)||0),costMile:Math.max(0,parseFloat(document.getElementById('scenario-cost-mile')?.value)||0),costHour:Math.max(0,parseFloat(document.getElementById('scenario-cost-hour')?.value)||0)};
 }
 function scenarioOrderDay(order,stop){return scenarioIsoDate(order?.plannedArrivedRaw)||scenarioIsoDate(order?.earliestRaw)||scenarioIsoDate(stop?.routeData?.plannedArrived)||routes.find(r=>r.id===stop?.routeId)?.date||'';}
 function scenarioSplitStopOrders(stop,predicate,reason){
@@ -7379,7 +7396,8 @@ function exportScenarioAfterActionReport(){
     {Setting:'Report Type',Value:r.mode==='lite'?'Lite ReOp':'Full Model'},
     {Setting:'Scenario Run At',Value:r.ranAt||''},
     {Setting:'Order Types — Ignore',Value:ignoreValues.join(', ')||'None'},
-    {Setting:'% of Orders',Value:(opts.ignorePercent??100)+'%'},
+    {Setting:'Removal Target',Value:opts.ignoreBasis==='stops'?'% of Customer Stops':(opts.ignoreBasis==='cases'?'% of Cases':'% of Orders')},
+    {Setting:'Removal %',Value:(opts.ignorePercent??100)+'%'},
     {Setting:'Distance Allowance',Value:(parseFloat(opts.ignoreDistanceMiles)||0)>0?(parseFloat(opts.ignoreDistanceMiles).toFixed(1)+' miles'):'Blank / farthest-first'},
     {Setting:'Minimum Case Count',Value:opts.minCases||0},
     {Setting:'Open Window By — Open (minutes)',Value:opts.windowOpen||0},
@@ -7411,6 +7429,10 @@ function exportScenarioAfterActionReport(){
   reportWs['!cols']=[{wch:34},{wch:18},{wch:18},{wch:18},{wch:16}];
   XLSX.utils.book_append_sheet(wb,summaryWs,'Scenario Summary');
   XLSX.utils.book_append_sheet(wb,reportWs,'After Action Report');
+  const removalRows=scenarioRemovalDetailsRows(r.removed?.removalDetails||[]);
+  const removalWs=XLSX.utils.json_to_sheet(removalRows.length?removalRows:[{'Customer':'No direct scenario removals'}]);
+  removalWs['!cols']=[{wch:28},{wch:18},{wch:42},{wch:12},{wch:12},{wch:30},{wch:18},{wch:28},{wch:18},{wch:16}];
+  XLSX.utils.book_append_sheet(wb,removalWs,'Removal Details');
   const d=new Date();
   const stamp=d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'_'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0');
   XLSX.writeFile(wb,`RouteER_Scenario_After_Action_${stamp}.xlsx`);
@@ -8525,6 +8547,47 @@ document.addEventListener('click',e=>{if(e.target.classList.contains('modal-over
 
 
 
+
+
+// ============================================================
+// V26 REMOVAL TARGET + REMOVAL DETAILS
+// ============================================================
+function scenarioRemovalBasisLabel(value){return value==='stops'?'Customer Stops':(value==='cases'?'Cases':'Orders');}
+function scenarioSelectedIgnoreOrders(opts){
+  const pct=Math.max(0,Math.min(100,parseFloat(opts?.ignorePercent ?? 100)||0));
+  const allowance=Math.max(0,parseFloat(opts?.ignoreDistanceMiles)||0),basis=opts?.ignoreBasis||'orders';
+  const groups=[];let stableIndex=0;
+  stops.filter(s=>s.sourceType==='route-data'&&s.routeId&&!scenarioIsFixedRouteAnchor(s)).forEach(stop=>{const distance=scenarioStopDepotDistanceMiles(stop);const matching=(stop.orders||[]).filter(o=>opts.ignoreValues.has(sval(o.ignoreType)));if(!matching.length)return;groups.push({stop,orders:matching,distance:Number.isFinite(distance)?distance:null,outside:Number.isFinite(distance)&&distance>allowance,stableIndex:stableIndex++,cases:matching.reduce((a,o)=>a+(parseFloat(o.cases)||0),0)});});
+  groups.sort((a,b)=>{if(a.outside!==b.outside)return a.outside?-1:1;const ad=Number.isFinite(a.distance)?a.distance:-1,bd=Number.isFinite(b.distance)?b.distance:-1;if(bd!==ad)return bd-ad;return a.stableIndex-b.stableIndex;});
+  const allOrders=groups.flatMap(g=>g.orders),totalCases=groups.reduce((a,g)=>a+g.cases,0),selected=new Set();
+  const base={selected,matched:allOrders.length,target:0,outsideMatched:groups.filter(g=>g.outside).reduce((a,g)=>a+g.orders.length,0),matchedStops:groups.length,targetStops:0,matchedCases:totalCases,targetCases:0,basis};
+  if(!groups.length||pct<=0)return base;
+  if(basis==='stops'){
+    const targetStops=pct>=100?groups.length:Math.min(groups.length,Math.ceil(groups.length*pct/100));groups.slice(0,targetStops).forEach(g=>g.orders.forEach(o=>selected.add(o)));return {...base,target:selected.size,targetStops,targetCases:groups.slice(0,targetStops).reduce((a,g)=>a+g.cases,0)};
+  }
+  const orderCandidates=[];groups.forEach(g=>g.orders.forEach(o=>orderCandidates.push({order:o,group:g})));
+  if(basis==='cases'){
+    const targetCases=pct>=100?totalCases:totalCases*pct/100;let running=0;for(const c of orderCandidates){selected.add(c.order);running+=parseFloat(c.order.cases)||0;if(running+1e-9>=targetCases)break;}const ss=new Set(orderCandidates.filter(c=>selected.has(c.order)).map(c=>c.group.stop.id));return {...base,target:selected.size,targetStops:ss.size,targetCases};
+  }
+  const target=pct>=100?orderCandidates.length:Math.min(orderCandidates.length,Math.ceil(orderCandidates.length*pct/100));orderCandidates.slice(0,target).forEach(c=>selected.add(c.order));const ss=new Set(orderCandidates.slice(0,target).map(c=>c.group.stop.id));return {...base,target,targetStops:ss.size,targetCases:orderCandidates.slice(0,target).reduce((a,c)=>a+(parseFloat(c.order.cases)||0),0)};
+}
+function scenarioRemovalDetailFromSplit(stop,removed,reason,routeIdBefore){
+  if(!removed?.length)return null;const route=(scenarioBaseline?.routes||[]).find(r=>r.id===routeIdBefore)||routes.find(r=>r.id===routeIdBefore)||null;const distance=scenarioStopDepotDistanceMiles({...stop,routeId:routeIdBefore});return {customer:stop.customerName||removed[0]?.customerName||'Customer',locationKey:scenarioLocationKey(stop),address:[stop.address,stop.city,stop.state,stop.zip].filter(Boolean).join(', '),cases:removed.reduce((a,o)=>a+(parseFloat(o.cases)||0),0),orders:removed.length,routeId:routeIdBefore||'',routeName:route?routeDisplayName(route):(stop.routeData?.resourceKey||''),reason:reason||'',distanceMiles:Number.isFinite(distance)?distance:null,stopEliminated:false,ignoreTypes:[...new Set(removed.map(o=>sval(o.ignoreType)).filter(Boolean))].join(', ')};
+}
+function scenarioSplitStopOrders(stop,predicate,reason){
+  const all=Array.isArray(stop.orders)?stop.orders:[];if(!all.length)return {removedOrders:0,removedCases:0,newStop:null,removalDetail:null};const removed=all.filter(predicate),kept=all.filter(o=>!predicate(o));if(!removed.length)return {removedOrders:0,removedCases:0,newStop:null,removalDetail:null};const routeIdBefore=stop.routeId||'',detail=scenarioRemovalDetailFromSplit(stop,removed,reason,routeIdBefore);const removedCases=removed.reduce((a,o)=>a+(parseFloat(o.cases)||0),0);let newStop=null;const originalCases=all.reduce((a,o)=>a+(parseFloat(o.cases)||0),0),originalShipped=Number.isFinite(parseFloat(stop.scenarioShippedCases))?parseFloat(stop.scenarioShippedCases):originalCases,removedShipped=originalCases>0?originalShipped*(removedCases/originalCases):0;if(!kept.length){stop.routeId=null;stop.seq=0;stop.scenarioRemovedReason=reason;stop.orders=removed;stop.scenarioShippedCases=originalShipped;scenarioRecalcStop(stop);}else{stop.orders=kept;stop.scenarioShippedCases=Math.max(0,originalShipped-removedShipped);scenarioRecalcStop(stop);newStop=scenarioClone(stop);newStop.id=uid();newStop.routeId=null;newStop.seq=0;newStop.orders=removed;newStop.scenarioShippedCases=removedShipped;newStop.scenarioRemovedReason=reason;newStop.orderNumber=removed.map(o=>o.orderNumber).join(', ');newStop.orderNumbers=removed.map(o=>o.orderNumber);scenarioRecalcStop(newStop);}if(detail)detail.stopEliminated=!kept.length;return {removedOrders:removed.length,removedCases,newStop,removalDetail:detail};
+}
+function scenarioApplyFilters(opts){
+  let removedOrders=0,removedCases=0;const additions=[],removalDetails=[];let sel={selected:new Set(),matched:0,target:0,outsideMatched:0,matchedStops:0,targetStops:0,matchedCases:0,targetCases:0,basis:opts.ignoreBasis||'orders'};
+  if(opts.ignoreValues.size){sel=scenarioSelectedIgnoreOrders(opts);[...stops].filter(s=>s.sourceType==='route-data'&&s.routeId&&!scenarioIsFixedRouteAnchor(s)).forEach(s=>{const r=scenarioSplitStopOrders(s,o=>sel.selected.has(o),'Ignore subset: '+[...opts.ignoreValues].join(', '));removedOrders+=r.removedOrders;removedCases+=r.removedCases;if(r.newStop)additions.push(r.newStop);if(r.removalDetail)removalDetails.push(r.removalDetail);});}
+  stops.push(...additions);additions.length=0;
+  if(opts.minCases>0){const totals=new Map();stops.filter(s=>s.sourceType==='route-data'&&s.routeId).forEach(s=>(s.orders||[]).forEach(o=>{const k=(sval(o.locationKey)||s.shipToId)+'|'+scenarioOrderDay(o,s);totals.set(k,(totals.get(k)||0)+(parseFloat(o.cases)||0));}));[...stops].filter(s=>s.sourceType==='route-data'&&s.routeId&&!scenarioIsFixedRouteAnchor(s)).forEach(s=>{const r=scenarioSplitStopOrders(s,o=>{const k=(sval(o.locationKey)||s.shipToId)+'|'+scenarioOrderDay(o,s);return (totals.get(k)||0)<opts.minCases;},'Below '+opts.minCases+' combined cases');removedOrders+=r.removedOrders;removedCases+=r.removedCases;if(r.newStop)additions.push(r.newStop);if(r.removalDetail)removalDetails.push(r.removalDetail);});stops.push(...additions);}
+  stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(opts.removeRouteLock){s.preferredResourceKey='';(s.orders||[]).forEach(o=>o.preferredResourceKey='');}if(opts.removeSequenceLock){s.preferredRouteSequence='';(s.orders||[]).forEach(o=>o.preferredRouteSequence='');}if(opts.ignoreAllWindows){scenarioSetDefaultCustomerWindow(s);}else if(opts.windowOpen||opts.windowClose){(s.orders||[]).forEach(o=>{const e=scenarioParseDate(o.earliestRaw),l=scenarioParseDate(o.latestRaw);if(e){e.setMinutes(e.getMinutes()-opts.windowOpen);o.earliestRaw=e.toISOString();}if(l){l.setMinutes(l.getMinutes()+opts.windowClose);o.latestRaw=l.toISOString();}});const es=(s.orders||[]).map(o=>scenarioEpochMinutes(o.earliestRaw)).filter(Number.isFinite),ls=(s.orders||[]).map(o=>scenarioEpochMinutes(o.latestRaw)).filter(Number.isFinite);if(es.length){const d=new Date(Math.min(...es)*60000);s.earliestTimeWindowRaw=d.toISOString();s.earliestTimeWindow=scenarioTime(d.toISOString());}if(ls.length){const d=new Date(Math.max(...ls)*60000);s.latestTimeWindowRaw=d.toISOString();s.latestTimeWindow=scenarioTime(d.toISOString());}}});reseq();return {removedOrders,removedCases,removalDetails,ignoreMatchedOrders:sel.matched,ignoreTargetOrders:sel.target,ignoreOutsideAllowanceOrders:sel.outsideMatched,ignoreMatchedStops:sel.matchedStops,ignoreTargetStops:sel.targetStops,ignoreMatchedCases:sel.matchedCases,ignoreTargetCases:sel.targetCases,ignoreBasis:sel.basis,ignorePercent:opts.ignorePercent,ignoreDistanceMiles:opts.ignoreDistanceMiles};
+}
+function scenarioRemovalDetailsRows(details){return (details||[]).map(d=>({'Customer':d.customer||'','LocationKey':d.locationKey||'','Address':d.address||'','Cases Removed':parseFloat(d.cases)||0,'Orders Removed':parseInt(d.orders,10)||0,'Original Route':d.routeName||d.routeId||'','Distance From Depot (mi)':Number.isFinite(parseFloat(d.distanceMiles))?parseFloat(d.distanceMiles):'','Removal Reason':d.reason||'','Ignore Type(s)':d.ignoreTypes||'','Physical Stop Eliminated':d.stopEliminated?'Yes':'No'}));}
+function openScenarioRemovalDetails(){
+  const r=scenarioLastRun;if(!r){showToast('Run Lite ReOp or Run Model first to create removal details.');return;}const details=r.removed?.removalDetails||[],totalCases=details.reduce((a,d)=>a+(parseFloat(d.cases)||0),0),totalOrders=details.reduce((a,d)=>a+(parseInt(d.orders,10)||0),0),fullStops=details.filter(d=>d.stopEliminated).length,basis=scenarioRemovalBasisLabel(r.options?.ignoreBasis||'orders');document.getElementById('scenario-removal-details-summary').innerHTML=`<strong>${details.length} customer removal record(s)</strong> · ${totalOrders.toLocaleString()} order line(s) · ${Math.round(totalCases).toLocaleString()} cases · ${fullStops} physical stop(s) fully eliminated.<br/><span style="color:var(--text3);">Removal target: ${escapeHtml(basis)} at ${scenarioFmt(r.options?.ignorePercent??100,0)}%${(parseFloat(r.options?.ignoreDistanceMiles)||0)>0?` · Distance Allowance ${scenarioFmt(r.options.ignoreDistanceMiles,1)} mi · farthest outside allowance first`:''}.</span>`;const body=document.getElementById('scenario-removal-details-body');if(!details.length){body.innerHTML='<div class="empty-state">No direct scenario removals were recorded for the last pass.</div>';}else body.innerHTML=`<div style="display:grid;grid-template-columns:220px 130px 330px 100px 110px 250px 140px 260px 130px;min-width:1700px;">${['Customer','LocationKey','Address','Cases','Orders','Original Route','Distance','Reason','Stop Eliminated'].map(h=>`<div style="position:sticky;top:0;background:var(--bg3);padding:8px;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);font-weight:800;text-transform:uppercase;z-index:2;">${h}</div>`).join('')}${details.map(d=>`<div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.customer||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.locationKey||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.address||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${scenarioFmt(d.cases,0)}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${scenarioFmt(d.orders,0)}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.routeName||d.routeId||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${Number.isFinite(parseFloat(d.distanceMiles))?scenarioFmt(d.distanceMiles,1)+' mi':'—'}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.reason||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${d.stopEliminated?'Yes':'No — partial orders'}</div>`).join('')}</div>`;document.getElementById('scenario-removal-details-modal').style.display='flex';
+}
 </script>
 </body>
 </html>
