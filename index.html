@@ -7427,6 +7427,27 @@ function exportScenarioAfterActionReport(){
   const removalWs=XLSX.utils.json_to_sheet(removalRows.length?removalRows:[{'Customer':'No direct scenario removals'}]);
   removalWs['!cols']=[{wch:28},{wch:18},{wch:42},{wch:12},{wch:12},{wch:30},{wch:18},{wch:28},{wch:18},{wch:16}];
   XLSX.utils.book_append_sheet(wb,removalWs,'Removal Details');
+  const na=r.removed?.networkAnalysis;
+  if(na){
+    const networkRows=[
+      {Metric:'Cross-route relocations evaluated',Value:na.relocationsEvaluated||0},
+      {Metric:'Cross-route relocations accepted',Value:na.relocationsAccepted||0},
+      {Metric:'Stop swaps evaluated',Value:na.swapsEvaluated||0},
+      {Metric:'Stop swaps accepted',Value:na.swapsAccepted||0},
+      {Metric:'Stops reassigned between routes',Value:na.stopsReassigned||0},
+      {Metric:'Local sequence improvements',Value:na.localSequenceMoves||0},
+      {Metric:'Dispatch changes accepted',Value:na.dispatchChanges||0},
+      {Metric:'Route retirement scenarios reviewed',Value:na.retirementReviewed||0},
+      {Metric:'Routes retired',Value:na.routesRetired||0},
+      {Metric:'Retired route names',Value:(na.retiredRoutes||[]).join(', ')},
+      {Metric:'Moves rejected — service quality',Value:na.rejectedService||0},
+      {Metric:'Moves rejected — capacity/runtime',Value:na.rejectedFeasibility||0},
+      {Metric:'Moves rejected — no efficiency gain',Value:na.rejectedNoGain||0}
+    ];
+    const nws=XLSX.utils.json_to_sheet(networkRows,{header:['Metric','Value']});
+    nws['!cols']=[{wch:42},{wch:60}];
+    XLSX.utils.book_append_sheet(wb,nws,'Network Optimization');
+  }
   const d=new Date();
   const stamp=d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'_'+String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0');
   XLSX.writeFile(wb,`RouteER_Scenario_After_Action_${stamp}.xlsx`);
@@ -8611,6 +8632,291 @@ function scenarioRemovalAnalysisReportHtml(r){
 function openScenarioRemovalDetails(){
   const r=scenarioLastRun;if(!r){showToast('Run Lite ReOp or Run Model first to create removal details.');return;}const details=r.removed?.removalDetails||[],totalCases=details.reduce((a,d)=>a+(parseFloat(d.cases)||0),0),totalOrders=details.reduce((a,d)=>a+(parseInt(d.orders,10)||0),0),fullStops=details.filter(d=>d.stopEliminated).length,basis=scenarioRemovalBasisLabel(r.options?.ignoreBasis||'orders');document.getElementById('scenario-removal-details-summary').innerHTML=`<strong>${details.length} customer removal record(s)</strong> · ${totalOrders.toLocaleString()} order line(s) · ${Math.round(totalCases).toLocaleString()} cases · ${fullStops} physical stop(s) fully eliminated.<br/><span style="color:var(--text3);">Removal target: ${escapeHtml(basis)} at ${scenarioFmt(r.options?.ignorePercent??100,0)}%${(parseFloat(r.options?.ignoreDistanceMiles)||0)>0?` · Distance Allowance ${scenarioFmt(r.options.ignoreDistanceMiles,1)} mi · farthest outside allowance first`:''}.</span>`;const body=document.getElementById('scenario-removal-details-body');if(!details.length){body.innerHTML='<div class="empty-state">No direct scenario removals were recorded for the last pass.</div>';}else body.innerHTML=`<div style="display:grid;grid-template-columns:220px 130px 330px 100px 110px 250px 140px 260px 130px;min-width:1700px;">${['Customer','LocationKey','Address','Cases','Orders','Original Route','Distance','Reason','Stop Eliminated'].map(h=>`<div style="position:sticky;top:0;background:var(--bg3);padding:8px;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);font-weight:800;text-transform:uppercase;z-index:2;">${h}</div>`).join('')}${details.map(d=>`<div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.customer||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.locationKey||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.address||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${scenarioFmt(d.cases,0)}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${scenarioFmt(d.orders,0)}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.routeName||d.routeId||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${Number.isFinite(parseFloat(d.distanceMiles))?scenarioFmt(d.distanceMiles,1)+' mi':'—'}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${escapeHtml(d.reason||'')}</div><div style="padding:8px;border-bottom:1px solid var(--border);font-size:10px;">${d.stopEliminated?'Yes':'No — partial orders'}</div>`).join('')}</div>`;document.getElementById('scenario-removal-details-modal').style.display='flex';
 }
+
+
+// ============================================================
+// V27 INCREMENTAL NETWORK OPTIMIZER
+// Full Model now accepts/rejects cross-route moves one at a time instead of
+// building a large candidate network and rolling the entire network back.
+// This preserves service quality while still allowing visible route-boundary
+// changes when individual relocations/swaps are operationally beneficial.
+// ============================================================
+function scenarioV27RouteProximityMiles(stop,route){
+  if(!stop||!route||!stop.lat||!stop.lng)return Infinity;
+  const pts=[];
+  const d=routeInitialDepot(route);if(d&&d.lat&&d.lng)pts.push(d);
+  stops.filter(s=>s.routeId===route.id&&!scenarioIsFixedRouteAnchor(s)&&s.lat&&s.lng).forEach(s=>pts.push(s));
+  if(!pts.length)return Infinity;
+  return Math.min(...pts.map(p=>roadAdjustedMiles(haversine(stop.lat,stop.lng,p.lat,p.lng))));
+}
+function scenarioV27GlobalMoveAccept(before,after,opts,{allowRouteReduction=true}={}){
+  if(!before||!after)return {ok:false,reason:'no gain'};
+  if(after.shippedCases+1e-6<before.shippedCases)return {ok:false,reason:'service'};
+  const bv=(before._violations?.runtime||0)+(before._violations?.capacity||0);
+  const av=(after._violations?.runtime||0)+(after._violations?.capacity||0);
+  if(av>bv)return {ok:false,reason:'feasibility'};
+  // New late deliveries are not accepted. Tiny percentage drift is tolerated
+  // because denominator changes can occur when a customer window is absent.
+  if(after.onTimePct+0.10<before.onTimePct)return {ok:false,reason:'service'};
+  const waitIncrease=(after.waitMinutes||0)-(before.waitMinutes||0);
+  const onTimeGain=(after.onTimePct||0)-(before.onTimePct||0);
+  const allowed=Math.max(0,parseFloat(opts.allowedWaitMinutes)||5);
+  if(onTimeGain<0.10&&waitIncrease>0.75)return {ok:false,reason:'service'};
+  if(onTimeGain>=0.10&&waitIncrease>Math.max(allowed,2))return {ok:false,reason:'service'};
+  if(allowRouteReduction&&after.routesUsed<before.routesUsed)return {ok:true,reason:'route reduction'};
+  const expenseGain=(before.expense!=null&&after.expense!=null)?before.expense-after.expense:null;
+  const hourGain=(before.hours||0)-(after.hours||0),mileGain=(before.miles||0)-(after.miles||0);
+  // With user cost assumptions, expense is the best combined logistics signal.
+  if(expenseGain!=null&&expenseGain>0.25)return {ok:true,reason:'expense'};
+  // Without expense, or when expense is effectively flat, require a material
+  // improvement to at least one operating dimension without damaging the other.
+  if(hourGain>0.03&&mileGain>-0.5)return {ok:true,reason:'hours'};
+  if(mileGain>0.5&&hourGain>-0.03)return {ok:true,reason:'miles'};
+  return {ok:false,reason:'no gain'};
+}
+function scenarioV27BestInsertion(stop,targetRoute,opts){
+  const base=scenarioRouteCustomerStops(targetRoute.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+  let best=null;
+  for(let i=0;i<=base.length;i++){
+    const cand=[...base];cand.splice(i,0,stop);
+    const ev=scenarioEvaluateRouteCustomers(targetRoute,cand,opts);
+    if(ev.capacity.known&&!ev.capacity.ok)continue;
+    if(!ev.capacity.known&&targetRoute.id!==scenarioOriginalRouteId(stop))continue;
+    if(!scenarioRuntimeOk(ev.sim,opts,true))continue;
+    const score=scenarioNetworkRouteScore(targetRoute,ev.sim,opts,null);
+    if(!best||score<best.score)best={evaluation:ev,score};
+  }
+  return best;
+}
+function scenarioV27TryRelocation(stop,source,target,opts){
+  const state=scenarioSnapshotWorkingState();
+  const before=scenarioAttachViolationSummary(scenarioComputeModelMetrics(opts),opts);
+  const sourceCustomers=scenarioRouteCustomerStops(source.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+  const sourceEval=scenarioEvaluateRouteCustomers(source,sourceCustomers,opts);
+  if(sourceEval.capacity.known&&!sourceEval.capacity.ok){scenarioRestoreWorkingState(state);return {accepted:false,reason:'feasibility'};}
+  // An empty donor is valid; otherwise enforce the max runtime. Minimum runtime
+  // is handled by route-retirement/consolidation rather than blocking a good move.
+  if(sourceCustomers.length&&!scenarioRuntimeOk(sourceEval.sim,opts,true)){scenarioRestoreWorkingState(state);return {accepted:false,reason:'feasibility'};}
+  const ins=scenarioV27BestInsertion(stop,target,opts);
+  if(!ins){scenarioRestoreWorkingState(state);return {accepted:false,reason:'feasibility'};}
+  stop.routeId=target.id;
+  scenarioApplyRouteOrder(source.id,sourceEval.order);
+  scenarioApplyRouteOrder(target.id,ins.evaluation.order);
+  // Only polish the two routes actually touched.
+  let seqMoves=0;seqMoves+=scenarioLocalImproveRoute(source.id,opts).moves||0;seqMoves+=scenarioLocalImproveRoute(target.id,opts).moves||0;
+  let dispatchChanges=0;
+  if(opts.optDispatch){
+    const sb=scenarioCurrentRouteSignature(source.id).dispatch,tb=scenarioCurrentRouteSignature(target.id).dispatch;
+    scenarioOptimizeDispatch(source,opts);scenarioOptimizeDispatch(target,opts);
+    if(scenarioCurrentRouteSignature(source.id).dispatch!==sb)dispatchChanges++;
+    if(scenarioCurrentRouteSignature(target.id).dispatch!==tb)dispatchChanges++;
+  }
+  const after=scenarioAttachViolationSummary(scenarioComputeModelMetrics(opts),opts);
+  const gate=scenarioV27GlobalMoveAccept(before,after,opts);
+  if(!gate.ok){scenarioRestoreWorkingState(state);return {accepted:false,reason:gate.reason};}
+  return {accepted:true,reason:gate.reason,before,after,seqMoves,dispatchChanges};
+}
+function scenarioV27TrySwap(a,b,routeA,routeB,opts){
+  const state=scenarioSnapshotWorkingState();
+  const before=scenarioAttachViolationSummary(scenarioComputeModelMetrics(opts),opts);
+  const aCustomers=scenarioRouteCustomerStops(routeA.id).filter(s=>s.id!==a.id);aCustomers.push(b);
+  const bCustomers=scenarioRouteCustomerStops(routeB.id).filter(s=>s.id!==b.id);bCustomers.push(a);
+  const ae=scenarioEvaluateRouteCustomers(routeA,aCustomers,opts),be=scenarioEvaluateRouteCustomers(routeB,bCustomers,opts);
+  if((ae.capacity.known&&!ae.capacity.ok)||(be.capacity.known&&!be.capacity.ok)||!scenarioRuntimeOk(ae.sim,opts,true)||!scenarioRuntimeOk(be.sim,opts,true)){
+    scenarioRestoreWorkingState(state);return {accepted:false,reason:'feasibility'};
+  }
+  a.routeId=routeB.id;b.routeId=routeA.id;
+  scenarioApplyRouteOrder(routeA.id,ae.order);scenarioApplyRouteOrder(routeB.id,be.order);
+  let seqMoves=(scenarioLocalImproveRoute(routeA.id,opts).moves||0)+(scenarioLocalImproveRoute(routeB.id,opts).moves||0),dispatchChanges=0;
+  if(opts.optDispatch){
+    const ab=scenarioCurrentRouteSignature(routeA.id).dispatch,bb=scenarioCurrentRouteSignature(routeB.id).dispatch;
+    scenarioOptimizeDispatch(routeA,opts);scenarioOptimizeDispatch(routeB,opts);
+    if(scenarioCurrentRouteSignature(routeA.id).dispatch!==ab)dispatchChanges++;
+    if(scenarioCurrentRouteSignature(routeB.id).dispatch!==bb)dispatchChanges++;
+  }
+  const after=scenarioAttachViolationSummary(scenarioComputeModelMetrics(opts),opts),gate=scenarioV27GlobalMoveAccept(before,after,opts,{allowRouteReduction:false});
+  if(!gate.ok){scenarioRestoreWorkingState(state);return {accepted:false,reason:gate.reason};}
+  return {accepted:true,reason:gate.reason,before,after,seqMoves,dispatchChanges};
+}
+function scenarioV27IncrementalNetworkOptimize(opts){
+  const stats={relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,acceptedMoves:[]};
+  // First improve each route locally. These moves already use the protected
+  // route-level service-quality gate.
+  routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r))stats.localSequenceMoves+=scenarioLocalImproveRoute(r.id,opts).moves||0;});
+  if(opts.optDispatch)routes.forEach(r=>{
+    if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))return;
+    const before=scenarioCurrentRouteSignature(r.id).dispatch;scenarioOptimizeDispatch(r,opts);if(scenarioCurrentRouteSignature(r.id).dispatch!==before)stats.dispatchChanges++;
+  });
+  if(!opts.removeRouteLock&&!stops.some(s=>scenarioStopCanChangeRoute(s,opts)))return stats;
+  // Incremental one-stop relocations. We repeatedly accept the single best
+  // beneficial move discovered in a pass, then restart from the improved network.
+  let acceptedGuard=0;
+  while(acceptedGuard++<80){
+    let acceptedThisPass=false;
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+    // Light/overlapping route boundaries are the highest-value places to test.
+    const sources=active.slice().sort((a,b)=>(scenarioRouteRuntime(a).hours||0)-(scenarioRouteRuntime(b).hours||0));
+    for(const source of sources){
+      const movable=scenarioRouteCustomerStops(source.id).filter(s=>scenarioStopCanChangeRoute(s,opts)&&!scenarioIsBackhaulStop(s));
+      for(const stop of movable){
+        const targets=active.filter(r=>r.id!==source.id&&scenarioCanTargetRoute(stop,r,opts))
+          .map(r=>({r,d:scenarioV27RouteProximityMiles(stop,r)})).filter(x=>Number.isFinite(x.d)).sort((a,b)=>a.d-b.d).slice(0,6);
+        for(const t of targets){
+          stats.relocationsEvaluated++;
+          const res=scenarioV27TryRelocation(stop,source,t.r,opts);
+          if(res.accepted){
+            stats.relocationsAccepted++;stats.stopsReassigned++;stats.localSequenceMoves+=res.seqMoves||0;stats.dispatchChanges+=res.dispatchChanges||0;
+            stats.acceptedMoves.push({type:'Relocate',customer:stop.customerName||'',locationKey:scenarioLocationKey(stop),from:routeDisplayName(source),to:routeDisplayName(t.r),reason:res.reason});
+            acceptedThisPass=true;break;
+          }
+          if(res.reason==='service')stats.rejectedService++;else if(res.reason==='feasibility')stats.rejectedFeasibility++;else stats.rejectedNoGain++;
+        }
+        if(acceptedThisPass)break;
+      }
+      if(acceptedThisPass)break;
+    }
+    if(!acceptedThisPass)break;
+  }
+  // Boundary swaps can improve geography even when neither route has room for a
+  // pure relocation. Limit the search to nearby stops to keep browser runtime bounded.
+  let swapGuard=0;
+  while(swapGuard++<20){
+    let accepted=false;
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+    outer: for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++){
+      const ra=active[i],rb=active[j];
+      const as=scenarioRouteCustomerStops(ra.id).filter(s=>scenarioStopCanChangeRoute(s,opts)&&!scenarioIsBackhaulStop(s));
+      const bs=scenarioRouteCustomerStops(rb.id).filter(s=>scenarioStopCanChangeRoute(s,opts)&&!scenarioIsBackhaulStop(s));
+      const pairs=[];
+      for(const a of as)for(const b of bs){
+        if(!scenarioCanTargetRoute(a,rb,opts)||!scenarioCanTargetRoute(b,ra,opts))continue;
+        const d=(a.lat&&a.lng&&b.lat&&b.lng)?roadAdjustedMiles(haversine(a.lat,a.lng,b.lat,b.lng)):Infinity;
+        if(d<=35)pairs.push({a,b,d});
+      }
+      pairs.sort((x,y)=>x.d-y.d);
+      for(const p of pairs.slice(0,5)){
+        stats.swapsEvaluated++;
+        const res=scenarioV27TrySwap(p.a,p.b,ra,rb,opts);
+        if(res.accepted){
+          stats.swapsAccepted++;stats.stopsReassigned+=2;stats.localSequenceMoves+=res.seqMoves||0;stats.dispatchChanges+=res.dispatchChanges||0;
+          stats.acceptedMoves.push({type:'Swap',customer:(p.a.customerName||'')+' ↔ '+(p.b.customerName||''),locationKey:scenarioLocationKey(p.a)+' ↔ '+scenarioLocationKey(p.b),from:routeDisplayName(ra),to:routeDisplayName(rb),reason:res.reason});
+          accepted=true;break outer;
+        }
+        if(res.reason==='service')stats.rejectedService++;else if(res.reason==='feasibility')stats.rejectedFeasibility++;else stats.rejectedNoGain++;
+      }
+    }
+    if(!accepted)break;
+  }
+  return stats;
+}
+
+// V27 removal accounting: keep Ignore/% selection and Minimum Case removals
+// separate so a 100% Ignore target can never display >100% merely because the
+// Minimum Case lever removed additional orders.
+scenarioApplyFilters = function(opts){
+  let removedOrders=0,removedCases=0;const additions=[],removalDetails=[],ignoreRemovalDetails=[],minCaseRemovalDetails=[];
+  let ignoreRemovedOrders=0,ignoreRemovedCases=0,minCaseRemovedOrders=0,minCaseRemovedCases=0;
+  let sel={selected:new Set(),matched:0,target:0,outsideMatched:0,matchedStops:0,targetStops:0,matchedCases:0,targetCases:0,basis:opts.ignoreBasis||'orders'};
+  if(opts.ignoreValues.size){
+    sel=scenarioSelectedIgnoreOrders(opts);
+    [...stops].filter(s=>s.sourceType==='route-data'&&s.routeId&&!scenarioIsFixedRouteAnchor(s)).forEach(s=>{
+      const r=scenarioSplitStopOrders(s,o=>sel.selected.has(o),'Order Type / % Removal: '+[...opts.ignoreValues].join(', '));
+      removedOrders+=r.removedOrders;removedCases+=r.removedCases;ignoreRemovedOrders+=r.removedOrders;ignoreRemovedCases+=r.removedCases;
+      if(r.newStop)additions.push(r.newStop);if(r.removalDetail){removalDetails.push(r.removalDetail);ignoreRemovalDetails.push(r.removalDetail);}
+    });
+  }
+  stops.push(...additions);additions.length=0;
+  if(opts.minCases>0){
+    const totals=new Map();
+    stops.filter(s=>s.sourceType==='route-data'&&s.routeId).forEach(s=>(s.orders||[]).forEach(o=>{const k=(sval(o.locationKey)||s.shipToId)+'|'+scenarioOrderDay(o,s);totals.set(k,(totals.get(k)||0)+(parseFloat(o.cases)||0));}));
+    [...stops].filter(s=>s.sourceType==='route-data'&&s.routeId&&!scenarioIsFixedRouteAnchor(s)).forEach(s=>{
+      const r=scenarioSplitStopOrders(s,o=>{const k=(sval(o.locationKey)||s.shipToId)+'|'+scenarioOrderDay(o,s);return (totals.get(k)||0)<opts.minCases;},'Minimum Case Count: below '+opts.minCases+' combined cases');
+      removedOrders+=r.removedOrders;removedCases+=r.removedCases;minCaseRemovedOrders+=r.removedOrders;minCaseRemovedCases+=r.removedCases;
+      if(r.newStop)additions.push(r.newStop);if(r.removalDetail){removalDetails.push(r.removalDetail);minCaseRemovalDetails.push(r.removalDetail);}
+    });
+    stops.push(...additions);
+  }
+  stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)).forEach(s=>{
+    if(opts.removeRouteLock){s.preferredResourceKey='';(s.orders||[]).forEach(o=>o.preferredResourceKey='');}
+    if(opts.removeSequenceLock){s.preferredRouteSequence='';(s.orders||[]).forEach(o=>o.preferredRouteSequence='');}
+    if(opts.ignoreAllWindows){scenarioSetDefaultCustomerWindow(s);}else if(opts.windowOpen||opts.windowClose){
+      (s.orders||[]).forEach(o=>{const e=scenarioParseDate(o.earliestRaw),l=scenarioParseDate(o.latestRaw);if(e){e.setMinutes(e.getMinutes()-opts.windowOpen);o.earliestRaw=e.toISOString();}if(l){l.setMinutes(l.getMinutes()+opts.windowClose);o.latestRaw=l.toISOString();}});
+      const es=(s.orders||[]).map(o=>scenarioEpochMinutes(o.earliestRaw)).filter(Number.isFinite),ls=(s.orders||[]).map(o=>scenarioEpochMinutes(o.latestRaw)).filter(Number.isFinite);
+      if(es.length){const d=new Date(Math.min(...es)*60000);s.earliestTimeWindowRaw=d.toISOString();s.earliestTimeWindow=scenarioTime(d.toISOString());}
+      if(ls.length){const d=new Date(Math.max(...ls)*60000);s.latestTimeWindowRaw=d.toISOString();s.latestTimeWindow=scenarioTime(d.toISOString());}
+    }
+  });
+  reseq();
+  return {removedOrders,removedCases,removalDetails,ignoreRemovalDetails,minCaseRemovalDetails,ignoreRemovedOrders,ignoreRemovedCases,minCaseRemovedOrders,minCaseRemovedCases,
+    ignoreMatchedOrders:sel.matched,ignoreTargetOrders:sel.target,ignoreOutsideAllowanceOrders:sel.outsideMatched,ignoreMatchedStops:sel.matchedStops,ignoreTargetStops:sel.targetStops,ignoreMatchedCases:sel.matchedCases,ignoreTargetCases:sel.targetCases,ignoreBasis:sel.basis,ignorePercent:opts.ignorePercent,ignoreDistanceMiles:opts.ignoreDistanceMiles};
+};
+
+scenarioRemovalAnalysisReportHtml = function(r){
+  if(!r)return '';
+  const all=r.removed?.removalDetails||[],ignore=r.removed?.ignoreRemovalDetails||[],minc=r.removed?.minCaseRemovalDetails||[];
+  const sum=d=>({orders:d.reduce((a,x)=>a+(parseInt(x.orders,10)||0),0),cases:d.reduce((a,x)=>a+(parseFloat(x.cases)||0),0),stops:d.filter(x=>x.stopEliminated).length});
+  const A=sum(all),I=sum(ignore),M=sum(minc),basis=scenarioRemovalBasisLabel(r.options?.ignoreBasis||'orders');
+  const matchedOrders=parseInt(r.removed?.ignoreMatchedOrders,10)||0,matchedStops=parseInt(r.removed?.ignoreMatchedStops,10)||0,matchedCases=parseFloat(r.removed?.ignoreMatchedCases)||0;
+  const basisMatched=r.options?.ignoreBasis==='stops'?matchedStops:(r.options?.ignoreBasis==='cases'?matchedCases:matchedOrders);
+  const basisRemoved=r.options?.ignoreBasis==='stops'?I.stops:(r.options?.ignoreBasis==='cases'?I.cases:I.orders);
+  const actualPct=basisMatched>0?basisRemoved/basisMatched*100:0,pct=parseFloat(r.options?.ignorePercent??100)||0,allowance=parseFloat(r.options?.ignoreDistanceMiles)||0;
+  return `<div class="scenario-card" style="margin-top:10px;"><div style="display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;"><div><h3 style="margin-bottom:3px;">Removal Analysis</h3><div class="scenario-help">Direct scenario removals only — optimizer route moves and consolidation are excluded.</div></div><button class="btn" type="button" onclick="openScenarioRemovalDetails()">View Removal Details</button></div>
+    <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(A.orders,0)}</div><div class="l">Total Order Lines Removed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(A.stops,0)}</div><div class="l">Customer Stops Eliminated</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(A.cases,0)}</div><div class="l">Total Cases Removed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(actualPct,1)}%</div><div class="l">Actual ${escapeHtml(basis)} Target Removal</div></div></div>
+    <div class="scenario-note" style="margin-top:6px;"><strong>Order Type / % Removal:</strong> ${I.orders} order line(s), ${I.stops} customer stop(s), ${scenarioFmt(I.cases,0)} cases. Target ${scenarioFmt(pct,0)}% of ${escapeHtml(basis)}${allowance>0?` · ${scenarioFmt(allowance,1)} mi allowance · farthest first`:''}. ${basisMatched?`Matched pool: ${scenarioFmt(basisMatched,r.options?.ignoreBasis==='cases'?0:0)} ${escapeHtml(basis.toLowerCase())}.`:''}<br/><strong>Minimum Case Removal:</strong> ${M.orders} order line(s), ${M.stops} customer stop(s), ${scenarioFmt(M.cases,0)} cases${r.options?.minCases>0?` below the ${scenarioFmt(r.options.minCases,0)}-case threshold`:''}.</div></div>`;
+};
+
+function scenarioV27NetworkAnalysisHtml(r){
+  const n=r?.removed?.networkAnalysis;if(!n)return '';
+  const moves=(n.acceptedMoves||[]).slice(0,12);
+  return `<div class="scenario-card" style="margin-top:10px;"><h3>Network Optimization Analysis</h3><div class="scenario-help">Accepted changes are committed one at a time. A bad candidate is rejected without rolling back other beneficial moves.</div>
+    <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${n.relocationsAccepted||0}</div><div class="l">Relocations Accepted</div></div><div class="scenario-kpi"><div class="v">${n.swapsAccepted||0}</div><div class="l">Swaps Accepted</div></div><div class="scenario-kpi"><div class="v">${n.stopsReassigned||0}</div><div class="l">Stops Reassigned</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div>
+    <div class="scenario-help"><strong>Evaluated:</strong> ${(n.relocationsEvaluated||0).toLocaleString()} relocation(s) and ${(n.swapsEvaluated||0).toLocaleString()} swap(s). <strong>Rejected:</strong> ${(n.rejectedService||0).toLocaleString()} service-quality · ${(n.rejectedFeasibility||0).toLocaleString()} capacity/runtime · ${(n.rejectedNoGain||0).toLocaleString()} no meaningful efficiency gain. <strong>Local sequence improvements:</strong> ${n.localSequenceMoves||0}. <strong>Dispatch changes:</strong> ${n.dispatchChanges||0}.${(n.retiredRoutes||[]).length?` <strong>Retired:</strong> ${escapeHtml(n.retiredRoutes.join(', '))}.`:''}</div>
+    ${moves.length?`<details class="order-expand" style="margin-top:8px;"><summary>Accepted Cross-Route Changes <span class="order-badge">${(n.acceptedMoves||[]).length}</span></summary><div style="padding:8px;max-height:240px;overflow:auto;">${moves.map(m=>`<div style="padding:5px 0;border-bottom:1px solid var(--border);font-size:10px;"><strong>${escapeHtml(m.type||'Move')}</strong> · ${escapeHtml(m.customer||'')} ${m.locationKey?`(${escapeHtml(m.locationKey)})`:''}<br/><span style="color:var(--text3);">${escapeHtml(m.from||'')} → ${escapeHtml(m.to||'')} · accepted for ${escapeHtml(m.reason||'operational improvement')}</span></div>`).join('')}${(n.acceptedMoves||[]).length>moves.length?`<div class="scenario-help" style="padding-top:6px;">Showing first ${moves.length} of ${(n.acceptedMoves||[]).length} accepted changes.</div>`:''}</div></details>`:''}</div>`;
+}
+
+// Replace Full Model with incremental acceptance. No all-or-nothing network
+// rollback is used in v27.
+runScenarioModel = function(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  const opts=scenarioReadOptions();if(opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();
+  stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+  scenarioBuildOptimizerBaselineSnapshot();
+  const removed=scenarioApplyFilters(opts);
+  scenarioCapturePostFilterTimingSnapshot(opts);
+  const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+  const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+  if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+  const network=scenarioV27IncrementalNetworkOptimize(opts);
+  removed.networkAnalysis=network;
+  // Whole-route retirement remains valuable after individual boundary moves.
+  const consolidation=scenarioRunMultiCandidateConsolidation(opts);removed.consolidation=consolidation;
+  network.retirementReviewed=consolidation.routesReviewed||0;network.routesRetired=consolidation.retiredRoutes||0;network.retiredRoutes=(consolidation.retired||[]).map(x=>x.routeName||x.routeId);network.stopsReassigned+=(consolidation.movedStops||0);network.acceptedMoves.push(...(consolidation.retired||[]).map(x=>({type:'Route Retirement',customer:`${x.movedStops||0} stop(s) redistributed`,locationKey:'',from:x.routeName||x.routeId,to:(x.receivers||[]).map(id=>routeDisplayName(routes.find(r=>r.id===id))).filter(Boolean).join(', '),reason:'route consolidation'})));
+
+  removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  let targetedRepair=null;
+  if((removed.runtimeViolations?.length||0)||(removed.capacityViolations?.length||0)){
+    targetedRepair=scenarioTargetedFeasibilityRepair(opts);removed.targetedRepair=targetedRepair;
+    if(targetedRepair?.accepted){
+      network.stopsReassigned+=targetedRepair.movedStops||0;network.localSequenceMoves+=targetedRepair.sequenceRepairs||0;network.dispatchChanges+=targetedRepair.dispatchRepairs||0;
+    }
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  }else removed.targetedRepair=null;
+  const modeled=scenarioComputeModelMetrics(opts);
+  let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+  if(verdict.verdict==='DEGRADED')verdict.verdict='INCREMENTAL MODEL — REVIEW';
+  else if(!removed.runtimeViolations.length&&!removed.capacityViolations.length&&(network.relocationsAccepted||network.swapsAccepted||network.routesRetired))verdict.verdict='IMPROVED — NETWORK OPTIMIZED';
+  else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';
+  const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'Incremental Network Optimizer v27',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+  scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+
+// Extend the existing report with the v27 network diagnostics.
+const scenarioOpenAfterActionReportV26_1=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){scenarioOpenAfterActionReportV26_1();if(scenarioLastRun?.mode==='full'){const body=document.getElementById('scenario-report-body');if(body)body.insertAdjacentHTML('beforeend',scenarioV27NetworkAnalysisHtml(scenarioLastRun));}};
+
 </script>
 </body>
 </html>
