@@ -916,6 +916,17 @@ body{background:var(--bg0);color:var(--text1);}
   <div class="modal scenario-modal">
     <h2>Scenario Levers</h2>
     <div class="scenario-note"><strong>Run Model</strong> starts from the original imported Route Detail baseline, applies the selected levers, and can optimize/rebalance the network. <strong>Run Lite ReOp</strong> also starts from the original baseline, but only applies the requested direct changes and recalculates their effect on the existing routes — it does not reroute, resequence, condense routes, move surviving stops between routes, or enforce runtime balancing. If removals leave a route with no customer stops, that route remains in the scenario as an <strong>Empty Route</strong>. Removed orders remain visible as unassigned work. <strong>Full Model</strong> also treats matched truck Cube and Weight as hard capacity limits and deliberately tests whether light normal routes can be fully retired after scenario removals; Lite ReOp does not reroute or consolidate work. Partial Order Type scenarios use the same percentage/distance selection in both Lite ReOp and Full Model.</div>
+    <div class="scenario-card" style="margin-top:10px;border-color:rgba(207,69,32,.55);">
+      <h3>Optimization Mode</h3>
+      <div class="field">
+        <label>How should Full Model build the solution?</label>
+        <select id="scenario-optimization-mode">
+          <option value="improve" selected>Improve Existing Routes</option>
+          <option value="scratch">Build From Scratch</option>
+        </select>
+      </div>
+      <div class="scenario-help"><strong>Improve Existing Routes</strong> uses the imported solution as the incumbent and keeps only beneficial changes. <strong>Build From Scratch</strong> clears customer assignments inside the model and rebuilds the remaining freight across the available imported route resources. All Scenario Levers apply in either mode. If Route Run Time fields are blank, RouteER uses each resource's imported availability/run-time setting instead of applying one network-wide limit.</div>
+    </div>
     <div class="scenario-grid" style="margin-top:10px;">
       <div class="scenario-card">
         <h3>Order Types — Ignore</h3>
@@ -8945,5 +8956,203 @@ const scenarioOpenAfterActionReportV26_1=openScenarioAfterActionReport;
 openScenarioAfterActionReport=function(){scenarioOpenAfterActionReportV26_1();if(scenarioLastRun?.mode==='full'){const body=document.getElementById('scenario-report-body');if(body)body.insertAdjacentHTML('beforeend',scenarioV27NetworkAnalysisHtml(scenarioLastRun));}};
 
 </script>
+
+<script>
+// ============================================================
+// V28 — OPTIMIZATION MODES / FROM-SCRATCH CONSTRUCTION
+// ============================================================
+const scenarioReadOptionsV27_2 = scenarioReadOptions;
+scenarioReadOptions = function(){
+  const o=scenarioReadOptionsV27_2();
+  const minEl=document.getElementById('scenario-min-route-hours');
+  const maxEl=document.getElementById('scenario-max-route-hours');
+  o.optimizationMode=document.getElementById('scenario-optimization-mode')?.value||'improve';
+  o.runtimeUseResourceMin=(minEl?.value??'').toString().trim()==='';
+  o.runtimeUseResourceMax=(maxEl?.value??'').toString().trim()==='';
+  return o;
+};
+
+function scenarioV28OriginalResourceLimits(route){
+  if(!route)return {min:0,max:0,source:'none'};
+  const raw=route.routeData?.routeSummaryRaw||route.raw||{};
+  let min=0;
+  try{
+    min=scenarioCleanFormula(gcLoose(raw,['MinimumRouteTime','Minimum Route Time','MinRouteTime','Min Route Time','Minimum Route Run Time','MinRouteHours','Minimum Route Hours']))||0;
+    if(min>100)min/=60;
+  }catch(e){min=0;}
+  let max=0,source='';
+  const start=scenarioEpochMinutes(route.routeData?.routeStart||route.routeSummaryStart||'');
+  const end=scenarioEpochMinutes(route.routeData?.routeEnd||route.routeSummaryEnd||'');
+  if(Number.isFinite(start)&&Number.isFinite(end)&&end>start){max=(end-start)/60;source='Route Summary Start/End';}
+  if(!(max>0)){
+    const s=timeToMinutes(route.earliestStartTime),e=timeToMinutes(route.latestEndTime);
+    if(s!==null&&e!==null){let d=e-s;if(d<=0)d+=1440;if(d>0&&d<=2880){max=d/60;source='Resource Start/End';}}
+  }
+  if(!(max>0)&&parseFloat(route.routeData?.totalTimeSeconds)>0){max=parseFloat(route.routeData.totalTimeSeconds)/3600;source='Imported Route Runtime';}
+  return {min:Math.max(0,min||0),max:Math.max(0,max||0),source:source||'none'};
+}
+function scenarioV28RuntimeLimits(route,opts){
+  const r=scenarioV28OriginalResourceLimits(route);
+  return {
+    min:opts?.runtimeUseResourceMin?r.min:(Math.max(0,parseFloat(opts?.minRouteHours)||0)),
+    max:opts?.runtimeUseResourceMax?r.max:(Math.max(0,parseFloat(opts?.maxRouteHours)||0)),
+    sourceMin:opts?.runtimeUseResourceMin?'Imported Resource':'Scenario Lever',
+    sourceMax:opts?.runtimeUseResourceMax?'Imported Resource':'Scenario Lever'
+  };
+}
+
+const scenarioEvaluateOrderedRouteV27_2=scenarioEvaluateOrderedRoute;
+scenarioEvaluateOrderedRoute=function(route,rs,startEpoch){
+  const sim=scenarioEvaluateOrderedRouteV27_2(route,rs,startEpoch);
+  if(sim&&route){const lim=scenarioV28OriginalResourceLimits(route);sim.resourceRouteId=route.id;sim.resourceMinHours=lim.min;sim.resourceMaxHours=lim.max;}
+  return sim;
+};
+
+scenarioRuntimeOk=function(sim,opts,allowBelowMin=false){
+  if(!sim)return false;
+  if(sim.isBackhaulOnly)return true;
+  if(sim.isLayover)return scenarioLayoverRuntimeOk(sim);
+  const max=opts?.runtimeUseResourceMax?(parseFloat(sim.resourceMaxHours)||0):(parseFloat(opts?.maxRouteHours)||0);
+  const min=opts?.runtimeUseResourceMin?(parseFloat(sim.resourceMinHours)||0):(parseFloat(opts?.minRouteHours)||0);
+  if(max>0&&sim.hours>max+1e-6)return false;
+  if(!allowBelowMin&&min>0&&sim.hours+1e-6<min)return false;
+  return true;
+};
+
+scenarioValidateRouteRuntimeLimits=function(opts){
+  const violations=[];
+  routes.forEach(route=>{
+    if(!scenarioRouteHasCustomerWork(route.id)||scenarioRouteIsBackhaulOnly(route))return;
+    const sim=scenarioRouteRuntime(route);
+    if(scenarioRouteIsLayover(route)){
+      if(!scenarioLayoverRuntimeOk(sim)){
+        const parts=(sim.segmentHours||[]).map((h,i)=>`Day ${i+1} ${h.toFixed(2)}h / ${i===(sim.segmentHours||[]).length-1?'8.00':'10.00'}h`).join(', ');
+        violations.push(`${routeDisplayName(route)} layover segments: ${parts}`);
+      }
+      return;
+    }
+    const lim=scenarioV28RuntimeLimits(route,opts);
+    if(lim.max>0&&sim.hours>lim.max+1e-6)violations.push(`${routeDisplayName(route)} = ${sim.hours.toFixed(2)}h (max ${lim.max.toFixed(2)}h · ${lim.sourceMax})`);
+    if(lim.min>0&&sim.hours+1e-6<lim.min)violations.push(`${routeDisplayName(route)} = ${sim.hours.toFixed(2)}h (min ${lim.min.toFixed(2)}h · ${lim.sourceMin})`);
+  });
+  return violations;
+};
+
+const scenarioRouteIsBackhaulOnlyV27_2=scenarioRouteIsBackhaulOnly;
+scenarioRouteIsBackhaulOnly=function(route){
+  if(scenarioRouteIsBackhaulOnlyV27_2(route))return true;
+  const baselineStops=scenarioBaseline?.stops||[];
+  const original=baselineStops.filter(s=>s.scenarioOriginalRouteId===route?.id&&!scenarioIsFixedRouteAnchor(s));
+  return original.length>0&&original.every(s=>scenarioIsBackhaulStop(s));
+};
+
+function scenarioV28ScratchCandidatePositions(stop,base,opts){
+  if(!opts.removeSequenceLock){
+    const p=preferredPosition(stop);
+    if(p>0)return [Math.max(0,Math.min(base.length,p-1))];
+  }
+  return Array.from({length:base.length+1},(_,i)=>i);
+}
+function scenarioV28ScratchPlacement(stop,opts){
+  let best=null;
+  for(const route of routes){
+    if(!scenarioCanTargetRoute(stop,route,opts))continue;
+    const base=scenarioRouteCustomerStops(route.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+    const cap0=scenarioCapacityStatus(route,[...base,stop]);
+    if(!cap0.known&&route.id!==scenarioOriginalRouteId(stop))continue;
+    if(cap0.known&&!cap0.ok)continue;
+    for(const i of scenarioV28ScratchCandidatePositions(stop,base,opts)){
+      const candidate=[...base];candidate.splice(i,0,stop);
+      const ordered=scenarioOrderCustomersForSpecialRules(candidate);
+      const ev=scenarioEvaluateRouteCustomers(route,ordered,opts);
+      if(ev.capacity.known&&!ev.capacity.ok)continue;
+      if(!scenarioRuntimeOk(ev.sim,opts,true))continue;
+      const activePenalty=base.length?0:14000;
+      const expense=(opts.costMile||opts.costHour)?((ev.sim.miles*(opts.costMile||0)+ev.sim.hours*(opts.costHour||0))*20):0;
+      let score=(ev.sim.late||0)*6000000+scenarioSoftWaitPenalty(ev.sim,opts)+activePenalty+expense;
+      score+=ev.sim.hours*(opts.optTime?1800:500)+ev.sim.miles*(opts.optMiles?70:18);
+      if(!best||score<best.score)best={route,order:ev.order,customers:ordered,sim:ev.sim,score};
+    }
+  }
+  return best;
+}
+function scenarioV28BuildFromScratch(opts){
+  const stats={mode:'scratch',poolStops:0,placedStops:0,unassignedStops:0,routesActivated:0,sequenceMoves:0,dispatchChanges:0};
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;
+  // Preserve imported D/L anchors as resource structure, but clear all customer work.
+  pool.forEach(s=>{s.routeId=null;s.seq=0;});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+  const depotDistance=s=>{
+    const baseRoute=(scenarioBaseline?.routes||[]).find(r=>r.id===scenarioOriginalRouteId(s));
+    const d=baseRoute?routeInitialDepot(baseRoute):null;
+    return d&&s.lat&&s.lng?roadAdjustedMiles(haversine(d.lat,d.lng,s.lat,s.lng)):0;
+  };
+  pool.sort((a,b)=>{
+    const al=scenarioStopHasRouteLock(a)?0:1,bl=scenarioStopHasRouteLock(b)?0:1;if(al!==bl)return al-bl;
+    const ac=scenarioStopShippedCases(a),bc=scenarioStopShippedCases(b);if(ac!==bc)return bc-ac;
+    return depotDistance(b)-depotDistance(a);
+  });
+  const activated=new Set();
+  for(const stop of pool){
+    const dest=scenarioV28ScratchPlacement(stop,opts);
+    if(dest){stop.routeId=dest.route.id;scenarioApplyRouteOrder(dest.route.id,dest.order);stats.placedStops++;activated.add(dest.route.id);}
+    else{stop.routeId=null;stop.seq=0;stop.scenarioRemovedReason=stop.scenarioRemovedReason||'Build From Scratch: no feasible route resource';stats.unassignedStops++;}
+  }
+  stats.routesActivated=activated.size;
+  routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)){const before=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');scenarioSequenceRoute(r.id,opts);const after=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');if(before!==after)stats.sequenceMoves++;}});
+  if(opts.optDispatch)routes.forEach(r=>{if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))return;const before=scenarioCurrentRouteSignature(r.id).dispatch;scenarioOptimizeDispatch(r,opts);if(scenarioCurrentRouteSignature(r.id).dispatch!==before)stats.dispatchChanges++;});
+  return stats;
+}
+
+// V28 Full Model: choose incumbent-improvement or a true empty-resource rebuild.
+runScenarioModel = function(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  const opts=scenarioReadOptions();
+  if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();
+  stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+  scenarioBuildOptimizerBaselineSnapshot();
+  const removed=scenarioApplyFilters(opts);
+  scenarioCapturePostFilterTimingSnapshot(opts);
+  const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+  const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+  if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+  let scratch=null;
+  if(opts.optimizationMode==='scratch')scratch=scenarioV28BuildFromScratch(opts);
+  const network=scenarioV27IncrementalNetworkOptimize(opts);removed.networkAnalysis=network;removed.scratchBuild=scratch;
+  const consolidation=scenarioRunMultiCandidateConsolidation(opts);removed.consolidation=consolidation;
+  network.retirementReviewed=consolidation.routesReviewed||0;network.routesRetired=consolidation.retiredRoutes||0;network.retiredRoutes=(consolidation.retired||[]).map(x=>x.routeName||x.routeId);network.stopsReassigned+=(consolidation.movedStops||0);network.acceptedMoves.push(...(consolidation.retired||[]).map(x=>({type:'Route Retirement',customer:`${x.movedStops||0} stop(s) redistributed`,locationKey:'',from:x.routeName||x.routeId,to:(x.receivers||[]).map(id=>routeDisplayName(routes.find(r=>r.id===id))).filter(Boolean).join(', '),reason:'route consolidation'})));
+
+  removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  if((removed.runtimeViolations?.length||0)||(removed.capacityViolations?.length||0)){
+    removed.targetedRepair=scenarioTargetedFeasibilityRepair(opts);
+    if(removed.targetedRepair?.accepted){network.stopsReassigned+=removed.targetedRepair.movedStops||0;network.localSequenceMoves+=removed.targetedRepair.sequenceRepairs||0;network.dispatchChanges+=removed.targetedRepair.dispatchRepairs||0;}
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  }else removed.targetedRepair=null;
+  const modeled=scenarioComputeModelMetrics(opts);
+  let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+  if(verdict.verdict==='DEGRADED')verdict.verdict=opts.optimizationMode==='scratch'?'FROM-SCRATCH MODEL — REVIEW':'INCREMENTAL MODEL — REVIEW';
+  else if(!removed.runtimeViolations.length&&!removed.capacityViolations.length&&(network.relocationsAccepted||network.swapsAccepted||network.routesRetired||scratch))verdict.verdict=opts.optimizationMode==='scratch'?'FROM-SCRATCH NETWORK BUILT':'IMPROVED — NETWORK OPTIMIZED';
+  else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict=opts.optimizationMode==='scratch'?'FROM-SCRATCH — FEASIBILITY WARNING':'INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';
+  const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:opts.optimizationMode==='scratch'?'From-Scratch Construction + Incremental Network Optimizer v28':'Incremental Network Optimizer v28',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+  scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+
+const openScenarioAfterActionReportV27_2=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV27_2();
+  const r=scenarioLastRun;if(!r||r.mode!=='full')return;
+  const summary=document.getElementById('scenario-report-summary');
+  if(summary){
+    const mode=r.options?.optimizationMode==='scratch'?'Build From Scratch':'Improve Existing Routes';
+    const runtime=r.options?.runtimeUseResourceMax?'per-resource imported Max runtime':'scenario Max runtime';
+    summary.insertAdjacentHTML('afterbegin',`<div class="scenario-note" style="margin-bottom:8px;"><strong>Optimization Mode:</strong> ${escapeHtml(mode)} · <strong>Blank Route Run Time behavior:</strong> ${escapeHtml(runtime)}${r.removed?.scratchBuild?` · Scratch pool ${r.removed.scratchBuild.poolStops||0} stop(s), initially placed ${r.removed.scratchBuild.placedStops||0}, activated ${r.removed.scratchBuild.routesActivated||0} resource(s), initially unplaced ${r.removed.scratchBuild.unassignedStops||0}.`:''}</div>`);
+  }
+};
+</script>
+
 </body>
 </html>
