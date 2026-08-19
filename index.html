@@ -920,12 +920,12 @@ body{background:var(--bg0);color:var(--text1);}
       <h3>Optimization Mode</h3>
       <div class="field">
         <label>How should Full Model build the solution?</label>
-        <select id="scenario-optimization-mode">
+        <select id="scenario-optimization-mode" onchange="scenarioV29OptimizationModeChanged()">
           <option value="improve" selected>Improve Existing Routes</option>
           <option value="scratch">Build From Scratch</option>
         </select>
       </div>
-      <div class="scenario-help"><strong>Improve Existing Routes</strong> uses the imported solution as the incumbent and keeps only beneficial changes. <strong>Build From Scratch</strong> clears customer assignments inside the model and rebuilds the remaining freight across the available imported route resources. All Scenario Levers apply in either mode. If Route Run Time fields are blank, RouteER uses each resource's imported availability/run-time setting instead of applying one network-wide limit.</div>
+      <div class="scenario-help"><strong>Improve Existing Routes</strong> uses the imported solution as the incumbent and keeps only beneficial changes. <strong>Build From Scratch</strong> clears customer assignments inside the model and rebuilds the remaining freight across the available imported route resources. All Scenario Levers apply in either mode. <strong>Build From Scratch defaults Route Lock and Sequence Lock to removed</strong> so the model can truly rebuild the network; you can intentionally turn either restriction back on afterward. If Route Run Time fields are blank, RouteER uses each resource's imported availability/run-time setting instead of applying one network-wide limit.</div>
     </div>
     <div class="scenario-grid" style="margin-top:10px;">
       <div class="scenario-card">
@@ -9151,6 +9151,219 @@ openScenarioAfterActionReport=function(){
     const runtime=r.options?.runtimeUseResourceMax?'per-resource imported Max runtime':'scenario Max runtime';
     summary.insertAdjacentHTML('afterbegin',`<div class="scenario-note" style="margin-bottom:8px;"><strong>Optimization Mode:</strong> ${escapeHtml(mode)} · <strong>Blank Route Run Time behavior:</strong> ${escapeHtml(runtime)}${r.removed?.scratchBuild?` · Scratch pool ${r.removed.scratchBuild.poolStops||0} stop(s), initially placed ${r.removed.scratchBuild.placedStops||0}, activated ${r.removed.scratchBuild.routesActivated||0} resource(s), initially unplaced ${r.removed.scratchBuild.unassignedStops||0}.`:''}</div>`);
   }
+};
+</script>
+
+
+<script>
+// ============================================================
+// V29 — REGRET-INSERTION SCRATCH CONSTRUCTION + FREIGHT RECOVERY
+// ============================================================
+function scenarioV29OptimizationModeChanged(){
+  const mode=document.getElementById('scenario-optimization-mode')?.value||'improve';
+  if(mode==='scratch'){
+    const routeLock=document.getElementById('scenario-remove-route-lock');
+    const seqLock=document.getElementById('scenario-remove-sequence-lock');
+    if(routeLock)routeLock.checked=true;
+    if(seqLock)seqLock.checked=true;
+    showToast('Build From Scratch: Route Lock and Sequence Lock defaulted to removed. Turn either back off only if you want to preserve that imported restriction.');
+  }
+}
+
+function scenarioV29RouteCapacityUtilization(route,customers){
+  const st=scenarioCapacityStatus(route,customers||scenarioRouteCustomerStops(route.id));
+  if(!st?.known)return 0;
+  const cube=st.cap?.cube>0?(st.load?.cube||0)/st.cap.cube:0;
+  const weight=st.cap?.weight>0?(st.load?.weight||0)/st.cap.weight:0;
+  return Math.max(cube,weight);
+}
+function scenarioV29RouteRuntimeUtilization(route,sim,opts){
+  if(!route||!sim||scenarioRouteIsBackhaulOnly(route)||scenarioRouteIsLayover(route))return 0;
+  const lim=scenarioV28RuntimeLimits(route,opts);
+  return lim.max>0?sim.hours/lim.max:0;
+}
+function scenarioV29ScratchPlacements(stop,opts,maxResults=3){
+  const results=[];
+  for(const route of routes){
+    if(!scenarioCanTargetRoute(stop,route,opts))continue;
+    const base=scenarioRouteCustomerStops(route.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+    const cap0=scenarioCapacityStatus(route,[...base,stop]);
+    const original=scenarioOriginalRouteId(stop);
+    if(!cap0.known&&route.id!==original)continue;
+    if(cap0.known&&!cap0.ok)continue;
+    const baseEval=scenarioEvaluateRouteCustomers(route,scenarioOrderCustomersForSpecialRules(base),opts);
+    const baseSim=baseEval.sim;
+    for(const i of scenarioV28ScratchCandidatePositions(stop,base,opts)){
+      const candidate=[...base];candidate.splice(i,0,stop);
+      const ordered=scenarioOrderCustomersForSpecialRules(candidate);
+      const ev=scenarioEvaluateRouteCustomers(route,ordered,opts);
+      if(ev.capacity.known&&!ev.capacity.ok)continue;
+      if(!scenarioRuntimeOk(ev.sim,opts,true))continue;
+      const deltaMiles=Math.max(0,(ev.sim.miles||0)-(baseSim.miles||0));
+      const deltaHours=Math.max(0,(ev.sim.hours||0)-(baseSim.hours||0));
+      const deltaWait=Math.max(0,(ev.sim.waitMinutes||0)-(baseSim.waitMinutes||0));
+      const deltaLate=Math.max(0,(ev.sim.late||0)-(baseSim.late||0));
+      const activationPenalty=base.length?0:3500;
+      const costDelta=deltaMiles*(opts.costMile||0)+deltaHours*(opts.costHour||0);
+      const runtimeUtil=scenarioV29RouteRuntimeUtilization(route,ev.sim,opts);
+      const capacityUtil=scenarioV29RouteCapacityUtilization(route,ordered);
+      // Preserve some headroom so difficult/large customers are not stranded late
+      // in construction. This is a ranking penalty only, never a reason to reject
+      // otherwise feasible freight.
+      const headroomPenalty=Math.max(0,runtimeUtil-.86)*5000+Math.max(0,capacityUtil-.88)*5000;
+      let score=deltaLate*7000000;
+      score+=deltaWait*900;
+      score+=activationPenalty+headroomPenalty+costDelta*35;
+      score+=deltaHours*(opts.optTime?1800:550)+deltaMiles*(opts.optMiles?95:24);
+      results.push({route,order:ev.order,customers:ordered,sim:ev.sim,score,deltaMiles,deltaHours,deltaWait,runtimeUtil,capacityUtil});
+    }
+  }
+  results.sort((a,b)=>a.score-b.score);
+  return results.slice(0,Math.max(1,maxResults));
+}
+function scenarioV29StopDifficulty(stop,opts){
+  const placements=scenarioV29ScratchPlacements(stop,opts,2);
+  const shipped=scenarioStopShippedCases(stop)||tCases(stop)||0;
+  const cube=tCube(stop)||0,weight=tWeight(stop)||0;
+  let regret=0;
+  if(placements.length===1)regret=1e8;
+  else if(placements.length>1)regret=Math.max(0,placements[1].score-placements[0].score);
+  return {stop,placements,count:placements.length,regret,shipped,cube,weight};
+}
+function scenarioV29RegretConstruct(pool,opts,stats){
+  const pending=[...(pool||[])];
+  let guard=0;
+  while(pending.length&&guard++<5000){
+    let choice=null;
+    // Recalculate feasible placements after every insertion. This is more work than
+    // greedy insertion, but avoids filling easy routes before hard freight has a home.
+    for(const stop of pending){
+      const d=scenarioV29StopDifficulty(stop,opts);
+      if(!d.count)continue;
+      if(!choice || d.count<choice.count ||
+         (d.count===choice.count&&d.regret>choice.regret+1e-6) ||
+         (d.count===choice.count&&Math.abs(d.regret-choice.regret)<1e-6&&d.shipped>choice.shipped))choice=d;
+    }
+    if(!choice)break;
+    const best=choice.placements[0];
+    choice.stop.routeId=best.route.id;
+    choice.stop.scenarioRemovedReason='';
+    scenarioApplyRouteOrder(best.route.id,best.order);
+    stats.placedStops++;
+    stats.placedCases+=scenarioStopShippedCases(choice.stop)||tCases(choice.stop)||0;
+    const idx=pending.indexOf(choice.stop);if(idx>=0)pending.splice(idx,1);
+  }
+  return pending;
+}
+function scenarioV29RecoveryPass(unplaced,opts,stats){
+  const rec={placedStops:0,placedCases:0,movedStops:0,swaps:0};
+  const final=scenarioPlacePoolFreightFirst(unplaced,opts,rec,{});
+  stats.recoveredStops+=rec.placedStops||0;
+  stats.recoveredCases+=rec.placedCases||0;
+  stats.recoverySwaps+=rec.swaps||0;
+  return final;
+}
+function scenarioV29BuildFromScratch(opts){
+  const stats={mode:'scratch',algorithm:'Regret insertion + recovery',poolStops:0,poolCases:0,placedStops:0,placedCases:0,recoveredStops:0,recoveredCases:0,recoverySwaps:0,unassignedStops:0,unassignedCases:0,routesActivated:0,sequenceMoves:0,dispatchChanges:0};
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;stats.poolCases=pool.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+
+  // Start with freight that is hardest to place, not simply the largest or farthest.
+  let unplaced=scenarioV29RegretConstruct(pool,opts,stats);
+  const initialPlaced=stats.placedStops;
+  const initialCases=stats.placedCases;
+
+  // A second network-wide recovery pass can use swaps/ejections after the initial
+  // route structure exists. Unassigned is only accepted after this attempt.
+  unplaced=scenarioV29RecoveryPass(unplaced,opts,stats);
+  stats.initialPlacedStops=initialPlaced;stats.initialPlacedCases=initialCases;
+  for(const stop of unplaced){
+    stop.routeId=null;stop.seq=0;stop.scenarioRemovedReason='Build From Scratch: no feasible route after regret insertion and recovery';
+  }
+  stats.unassignedStops=unplaced.length;
+  stats.unassignedCases=unplaced.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+
+  routes.forEach(r=>{
+    if(!scenarioRouteHasCustomerWork(r.id))return;
+    const before=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');
+    scenarioSequenceRoute(r.id,opts);
+    const after=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');
+    if(before!==after)stats.sequenceMoves++;
+  });
+  if(opts.optDispatch)routes.forEach(r=>{
+    if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))return;
+    const before=scenarioCurrentRouteSignature(r.id).dispatch;
+    scenarioOptimizeDispatch(r,opts);
+    if(scenarioCurrentRouteSignature(r.id).dispatch!==before)stats.dispatchChanges++;
+  });
+  return stats;
+}
+// V28 calls this symbol dynamically, so replace only the scratch constructor.
+scenarioV28BuildFromScratch=scenarioV29BuildFromScratch;
+
+function scenarioV29RetryScratchUnassigned(opts,stats){
+  const pool=stops.filter(s=>!s.routeId&&/^Build From Scratch:/i.test(s.scenarioRemovedReason||''));
+  if(!pool.length)return {attempted:0,recovered:0,cases:0};
+  pool.forEach(s=>s.scenarioRemovedReason='');
+  const beforeCases=pool.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  const rec={placedStops:0,placedCases:0,movedStops:0,swaps:0};
+  const final=scenarioPlacePoolFreightFirst(pool,opts,rec,{});
+  for(const s of final){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no feasible route after final network recovery';}
+  if(stats){stats.finalRecoveryAttempted=pool.length;stats.finalRecoveryStops=rec.placedStops||0;stats.finalRecoveryCases=rec.placedCases||0;stats.unassignedStops=final.length;stats.unassignedCases=final.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;}
+  return {attempted:pool.length,recovered:rec.placedStops||0,cases:rec.placedCases||0,beforeCases};
+}
+
+// V29 Full Model: same mature downstream optimizer, but a stronger scratch
+// constructor and one final recovery attempt after network changes have opened
+// additional capacity/time opportunities.
+runScenarioModel = function(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  const opts=scenarioReadOptions();
+  if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();
+  stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+  scenarioBuildOptimizerBaselineSnapshot();
+  const removed=scenarioApplyFilters(opts);
+  scenarioCapturePostFilterTimingSnapshot(opts);
+  const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+  const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+  if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+  let scratch=null;
+  if(opts.optimizationMode==='scratch')scratch=scenarioV29BuildFromScratch(opts);
+  const network=scenarioV27IncrementalNetworkOptimize(opts);removed.networkAnalysis=network;removed.scratchBuild=scratch;
+  const consolidation=scenarioRunMultiCandidateConsolidation(opts);removed.consolidation=consolidation;
+  network.retirementReviewed=consolidation.routesReviewed||0;network.routesRetired=consolidation.retiredRoutes||0;network.retiredRoutes=(consolidation.retired||[]).map(x=>x.routeName||x.routeId);network.stopsReassigned+=(consolidation.movedStops||0);network.acceptedMoves.push(...(consolidation.retired||[]).map(x=>({type:'Route Retirement',customer:`${x.movedStops||0} stop(s) redistributed`,locationKey:'',from:x.routeName||x.routeId,to:(x.receivers||[]).map(id=>routeDisplayName(routes.find(r=>r.id===id))).filter(Boolean).join(', '),reason:'route consolidation'})));
+
+  if(opts.optimizationMode==='scratch'&&scratch)scenarioV29RetryScratchUnassigned(opts,scratch);
+
+  removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  if((removed.runtimeViolations?.length||0)||(removed.capacityViolations?.length||0)){
+    removed.targetedRepair=scenarioTargetedFeasibilityRepair(opts);
+    if(removed.targetedRepair?.accepted){network.stopsReassigned+=removed.targetedRepair.movedStops||0;network.localSequenceMoves+=removed.targetedRepair.sequenceRepairs||0;network.dispatchChanges+=removed.targetedRepair.dispatchRepairs||0;}
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  }else removed.targetedRepair=null;
+  const modeled=scenarioComputeModelMetrics(opts);
+  let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+  if(verdict.verdict==='DEGRADED')verdict.verdict=opts.optimizationMode==='scratch'?'FROM-SCRATCH MODEL — REVIEW':'INCREMENTAL MODEL — REVIEW';
+  else if(!removed.runtimeViolations.length&&!removed.capacityViolations.length&&(network.relocationsAccepted||network.swapsAccepted||network.routesRetired||scratch))verdict.verdict=opts.optimizationMode==='scratch'?'FROM-SCRATCH NETWORK BUILT':'IMPROVED — NETWORK OPTIMIZED';
+  else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict=opts.optimizationMode==='scratch'?'FROM-SCRATCH — FEASIBILITY WARNING':'INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';
+  const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:opts.optimizationMode==='scratch'?'Regret-Insertion Scratch + Incremental Network Optimizer v29':'Incremental Network Optimizer v29',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+  scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+
+const openScenarioAfterActionReportV29Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV29Base();
+  const r=scenarioLastRun;if(!r||r.mode!=='full'||r.options?.optimizationMode!=='scratch')return;
+  const s=r.removed?.scratchBuild;if(!s)return;
+  const body=document.getElementById('scenario-report-body');if(!body)return;
+  const retained=s.poolCases>0?Math.max(0,(s.poolCases-(s.unassignedCases||0))/s.poolCases*100):100;
+  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;"><h3>Scratch Construction Analysis</h3><div class="scenario-help">V29 uses regret insertion: customers with the fewest feasible homes and the greatest penalty for delaying placement are built first. A network-wide recovery/ejection pass runs before freight is left Unassigned.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${s.poolStops||0}</div><div class="l">Construction Pool Stops</div></div><div class="scenario-kpi"><div class="v">${s.initialPlacedStops||0}</div><div class="l">Initial Regret Placements</div></div><div class="scenario-kpi"><div class="v">${(s.recoveredStops||0)+(s.finalRecoveryStops||0)}</div><div class="l">Recovered After Initial Build</div></div><div class="scenario-kpi"><div class="v">${s.unassignedStops||0}</div><div class="l">Final Scratch Unassigned</div></div></div><div class="scenario-note"><strong>Pool Cases:</strong> ${scenarioFmt(s.poolCases||0,0)} · <strong>Final Scratch Unassigned Cases:</strong> ${scenarioFmt(s.unassignedCases||0,0)} · <strong>Scratch Freight Retention:</strong> ${scenarioFmt(retained,1)}% · <strong>Routes Activated:</strong> ${s.routesActivated||0} · <strong>Recovery Swaps:</strong> ${s.recoverySwaps||0}${s.finalRecoveryAttempted?` · <strong>Final recovery:</strong> ${s.finalRecoveryStops||0} of ${s.finalRecoveryAttempted||0} stop(s) recovered`:''}.</div></div>`);
 };
 </script>
 
