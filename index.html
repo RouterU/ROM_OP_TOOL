@@ -5787,13 +5787,17 @@ function outputRawValue(order,stop,keys){
 function outputRequirements(order,stop,route){
   return order?.orderRequirements||outputRawValue(order,stop,['Requirements','Order Requirements'])||stop?.requirements||route?.requirements||'';
 }
-function outputProjectedDistanceMiles(pt){
+function outputProjectedLegDistanceFeet(pt){
   if(!pt||!Number.isFinite(parseFloat(pt.legMiles)))return 0;
-  return parseFloat(roadAdjustedMiles(parseFloat(pt.legMiles)).toFixed(2));
+  // Output File ProjectedDistance is cumulative FEET.  Convert each modeled
+  // road-adjusted leg from miles to feet before adding it to the route total.
+  return roadAdjustedMiles(parseFloat(pt.legMiles))*5280;
 }
-function outputProjectedDriveSeconds(pt){
+function outputProjectedLegDriveSeconds(pt){
   if(!pt||!Number.isFinite(parseFloat(pt.driveMins)))return 0;
-  return Math.round(parseFloat(pt.driveMins)*60);
+  // ProjectedTimeDriven is cumulative travel/drive time only (seconds).
+  // Service, wait and breaks are intentionally not included here.
+  return parseFloat(pt.driveMins)*60;
 }
 function buildOutputFileRows(routeIdSet=null){
   const rows=[];
@@ -5806,9 +5810,15 @@ function buildOutputFileRows(routeIdSet=null){
     const routeCustomerStops=stops.filter(s=>String(s.routeId||'')===String(route.id));
     if(!routeCustomerStops.length)return;
     const timeline=routeTimelineRows(route.id);
+    let cumulativeProjectedDistanceFeet=0;
+    let cumulativeProjectedDriveSeconds=0;
     timeline.forEach(pt=>{
-      const projectedDistance=outputProjectedDistanceMiles(pt);
-      const projectedTimeDriven=outputProjectedDriveSeconds(pt);
+      // Accumulate travel through the route so every exported row represents
+      // distance/time from route origin through the current physical stop.
+      cumulativeProjectedDistanceFeet+=outputProjectedLegDistanceFeet(pt);
+      cumulativeProjectedDriveSeconds+=outputProjectedLegDriveSeconds(pt);
+      const projectedDistance=Math.round(cumulativeProjectedDistanceFeet);
+      const projectedTimeDriven=Math.round(cumulativeProjectedDriveSeconds);
       if(pt.type!=='stop'){
         const d=pt.depot||{};
         rows.push({
