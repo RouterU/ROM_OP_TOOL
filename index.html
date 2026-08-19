@@ -9363,9 +9363,334 @@ openScenarioAfterActionReport=function(){
   const s=r.removed?.scratchBuild;if(!s)return;
   const body=document.getElementById('scenario-report-body');if(!body)return;
   const retained=s.poolCases>0?Math.max(0,(s.poolCases-(s.unassignedCases||0))/s.poolCases*100):100;
-  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;"><h3>Scratch Construction Analysis</h3><div class="scenario-help">V29 uses regret insertion: customers with the fewest feasible homes and the greatest penalty for delaying placement are built first. A network-wide recovery/ejection pass runs before freight is left Unassigned.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${s.poolStops||0}</div><div class="l">Construction Pool Stops</div></div><div class="scenario-kpi"><div class="v">${s.initialPlacedStops||0}</div><div class="l">Initial Regret Placements</div></div><div class="scenario-kpi"><div class="v">${(s.recoveredStops||0)+(s.finalRecoveryStops||0)}</div><div class="l">Recovered After Initial Build</div></div><div class="scenario-kpi"><div class="v">${s.unassignedStops||0}</div><div class="l">Final Scratch Unassigned</div></div></div><div class="scenario-note"><strong>Pool Cases:</strong> ${scenarioFmt(s.poolCases||0,0)} · <strong>Final Scratch Unassigned Cases:</strong> ${scenarioFmt(s.unassignedCases||0,0)} · <strong>Scratch Freight Retention:</strong> ${scenarioFmt(retained,1)}% · <strong>Routes Activated:</strong> ${s.routesActivated||0} · <strong>Recovery Swaps:</strong> ${s.recoverySwaps||0}${s.finalRecoveryAttempted?` · <strong>Final recovery:</strong> ${s.finalRecoveryStops||0} of ${s.finalRecoveryAttempted||0} stop(s) recovered`:''}.</div></div>`);
+  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;"><h3>Scratch Construction Analysis</h3><div class="scenario-help">V30 uses geographic cluster-first construction with bearing-aware depot sectors, demand balancing, boundary cleanup, and deep freight recovery before any stop is left Unassigned.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${s.poolStops||0}</div><div class="l">Construction Pool Stops</div></div><div class="scenario-kpi"><div class="v">${s.initialPlacedStops||0}</div><div class="l">Initial Regret Placements</div></div><div class="scenario-kpi"><div class="v">${(s.recoveredStops||0)+(s.finalRecoveryStops||0)}</div><div class="l">Recovered After Initial Build</div></div><div class="scenario-kpi"><div class="v">${s.unassignedStops||0}</div><div class="l">Final Scratch Unassigned</div></div></div><div class="scenario-note"><strong>Pool Cases:</strong> ${scenarioFmt(s.poolCases||0,0)} · <strong>Final Scratch Unassigned Cases:</strong> ${scenarioFmt(s.unassignedCases||0,0)} · <strong>Scratch Freight Retention:</strong> ${scenarioFmt(retained,1)}% · <strong>Routes Activated:</strong> ${s.routesActivated||0} · <strong>Recovery Swaps:</strong> ${s.recoverySwaps||0}${s.finalRecoveryAttempted?` · <strong>Final recovery:</strong> ${s.finalRecoveryStops||0} of ${s.finalRecoveryAttempted||0} stop(s) recovered`:''}.</div></div>`);
 };
 </script>
 
+
+<script>
+// ============================================================
+// V30 — GEOGRAPHIC CLUSTER-FIRST / BEARING-AWARE SCRATCH BUILD
+// ============================================================
+function scenarioV30AngleDeg(lat1,lng1,lat2,lng2){
+  const a1=lat1*Math.PI/180,a2=lat2*Math.PI/180,dl=(lng2-lng1)*Math.PI/180;
+  const y=Math.sin(dl)*Math.cos(a2);
+  const x=Math.cos(a1)*Math.sin(a2)-Math.sin(a1)*Math.cos(a2)*Math.cos(dl);
+  return (Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+function scenarioV30AngleDiff(a,b){let d=Math.abs((a-b)%360);return d>180?360-d:d;}
+function scenarioV30CircularSpread(vals){
+  const a=(vals||[]).filter(Number.isFinite).map(x=>((x%360)+360)%360).sort((x,y)=>x-y);
+  if(a.length<2)return 0;
+  let maxGap=0;
+  for(let i=0;i<a.length;i++){const n=i===a.length-1?a[0]+360:a[i+1];maxGap=Math.max(maxGap,n-a[i]);}
+  return 360-maxGap;
+}
+function scenarioV30StopPolar(stop,depot){
+  if(!stop||!depot)return null;
+  const lat=parseFloat(stop.lat),lng=parseFloat(stop.lng),dlat=parseFloat(depot.lat),dlng=parseFloat(depot.lng);
+  if(![lat,lng,dlat,dlng].every(Number.isFinite))return null;
+  const air=haversine(dlat,dlng,lat,lng);
+  return {bearing:scenarioV30AngleDeg(dlat,dlng,lat,lng),airMiles:air,roadMiles:roadAdjustedMiles(air)};
+}
+function scenarioV30RouteResourceCapacity(route){
+  const c=scenarioCapacityStatus(route,[]);
+  const lim=scenarioV28RuntimeLimits(route,{runtimeUseResourceMin:true,runtimeUseResourceMax:true});
+  return {weight:parseFloat(c?.limits?.weight)||parseFloat(routeCapacityLimits(route)?.weight)||0,cube:parseFloat(c?.limits?.cube)||parseFloat(routeCapacityLimits(route)?.totalCube)||0,maxHours:lim.max||0};
+}
+function scenarioV30StopDemand(stop){
+  return {weight:Math.max(0,tWeight(stop)||0),cube:Math.max(0,tCube(stop)||0),service:Math.max(0,stopServiceMinutes(stop)||0),cases:Math.max(0,scenarioStopShippedCases(stop)||tCases(stop)||0)};
+}
+function scenarioV30GroupDepot(stop,opts){
+  if(opts.keepAssignedDepot){
+    const key=scenarioStopOriginalDepotKey(stop); if(key)return key;
+  }
+  let best=null;
+  for(const d of depotLocations){
+    if(!Number.isFinite(parseFloat(d.lat))||!Number.isFinite(parseFloat(d.lng))||!Number.isFinite(parseFloat(stop.lat))||!Number.isFinite(parseFloat(stop.lng)))continue;
+    const mi=haversine(parseFloat(d.lat),parseFloat(d.lng),parseFloat(stop.lat),parseFloat(stop.lng));
+    if(!best||mi<best.mi)best={key:scenarioNormalizeDepotKey(d.locationKey),mi};
+  }
+  return best?.key||'';
+}
+function scenarioV30RoutesForDepot(depotKey,opts){
+  const eligible=routes.filter(r=>!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+  if(!opts.keepAssignedDepot||!depotKey)return eligible;
+  return eligible.filter(r=>scenarioRoutePrimaryDepotKey(r)===depotKey);
+}
+function scenarioV30BestCircularCut(points){
+  const arr=[...points].sort((a,b)=>a.polar.bearing-b.polar.bearing);
+  if(arr.length<2)return arr;
+  let maxGap=-1,cut=0;
+  for(let i=0;i<arr.length;i++){
+    const next=i===arr.length-1?arr[0].polar.bearing+360:arr[i+1].polar.bearing;
+    const gap=next-arr[i].polar.bearing;
+    if(gap>maxGap){maxGap=gap;cut=(i+1)%arr.length;}
+  }
+  return [...arr.slice(cut),...arr.slice(0,cut).map(x=>({...x,sortBearing:x.polar.bearing+360}))].map((x,i)=>({...x,sortBearing:x.sortBearing??x.polar.bearing}));
+}
+function scenarioV30ClusterWeight(item,avgCap){
+  const d=item.demand;
+  const w=avgCap.weight>0?d.weight/avgCap.weight:0;
+  const c=avgCap.cube>0?d.cube/avgCap.cube:0;
+  const t=avgCap.hours>0?d.service/(avgCap.hours*60):0;
+  return Math.max(w,c,t)*8+Math.max(w,c)*3+0.08+(item.polar.roadMiles/5000);
+}
+function scenarioV30BuildAngularClusters(items,k,routeCaps){
+  if(!items.length||k<=0)return [];
+  k=Math.max(1,Math.min(k,items.length));
+  const avgCap={weight:routeCaps.reduce((a,c)=>a+c.weight,0)/Math.max(1,routeCaps.filter(c=>c.weight>0).length),cube:routeCaps.reduce((a,c)=>a+c.cube,0)/Math.max(1,routeCaps.filter(c=>c.cube>0).length),hours:routeCaps.reduce((a,c)=>a+c.maxHours,0)/Math.max(1,routeCaps.filter(c=>c.maxHours>0).length)};
+  const ordered=scenarioV30BestCircularCut(items);
+  const weights=ordered.map(x=>scenarioV30ClusterWeight(x,avgCap));
+  const total=weights.reduce((a,b)=>a+b,0)||ordered.length;
+  const clusters=Array.from({length:k},()=>[]);
+  let ci=0,cum=0;
+  ordered.forEach((item,idx)=>{
+    const remainingItems=ordered.length-idx,remainingClusters=k-ci;
+    if(ci<k-1&&clusters[ci].length&&cum>=total*(ci+1)/k&&remainingItems>=remainingClusters){ci++;}
+    clusters[ci].push(item);cum+=weights[idx]||1;
+  });
+  return clusters.filter(x=>x.length);
+}
+function scenarioV30ClusterDemand(cluster){
+  return cluster.reduce((a,x)=>{a.weight+=x.demand.weight;a.cube+=x.demand.cube;a.service+=x.demand.service;a.cases+=x.demand.cases;return a;},{weight:0,cube:0,service:0,cases:0});
+}
+function scenarioV30ClusterCenter(cluster){
+  if(!cluster.length)return {bearing:0,distance:0};
+  let sx=0,sy=0,dist=0,wt=0;
+  cluster.forEach(x=>{const w=Math.max(1,x.demand.cases||1);sx+=Math.cos(x.polar.bearing*Math.PI/180)*w;sy+=Math.sin(x.polar.bearing*Math.PI/180)*w;dist+=x.polar.roadMiles*w;wt+=w;});
+  return {bearing:(Math.atan2(sy,sx)*180/Math.PI+360)%360,distance:dist/Math.max(1,wt)};
+}
+function scenarioV30RouteFitForCluster(route,cluster){
+  const cap=scenarioV30RouteResourceCapacity(route),dem=scenarioV30ClusterDemand(cluster),center=scenarioV30ClusterCenter(cluster);
+  const w=cap.weight>0?dem.weight/cap.weight:0,c=cap.cube>0?dem.cube/cap.cube:0;
+  const serviceH=dem.service/60;
+  const time=cap.maxHours>0?serviceH/cap.maxHours:0;
+  const overload=Math.max(0,w-1)*1e8+Math.max(0,c-1)*1e8+Math.max(0,time-0.82)*2e5;
+  return {score:overload+Math.max(w,c)*10000+time*6000-center.distance*2,cap,dem};
+}
+function scenarioV30AssignClustersToRoutes(clusters,routePool){
+  const left=[...routePool],out=[];
+  const sorted=[...clusters].sort((a,b)=>{const da=scenarioV30ClusterDemand(a),db=scenarioV30ClusterDemand(b);return (db.weight+db.cube*20+db.service*15)-(da.weight+da.cube*20+da.service*15);});
+  for(const cl of sorted){
+    let best=null;
+    for(const r of left){const f=scenarioV30RouteFitForCluster(r,cl);if(!best||f.score<best.fit.score)best={route:r,fit:f};}
+    if(!best)break;
+    out.push({cluster:cl,route:best.route});left.splice(left.indexOf(best.route),1);
+  }
+  return {assigned:out,unused:left};
+}
+function scenarioV30CompactOrder(route,cluster,opts){
+  const base=cluster.map(x=>x.stop);
+  const depot=routeInitialDepot(route)||routeFinalDepot(route);
+  if(!depot)return scenarioOrderCustomersForSpecialRules(base);
+  const remaining=[...base],ordered=[];let cur={lat:parseFloat(depot.lat),lng:parseFloat(depot.lng)};
+  while(remaining.length){
+    let bi=0,bs=Infinity;
+    remaining.forEach((s,i)=>{
+      const d=haversine(cur.lat,cur.lng,parseFloat(s.lat),parseFloat(s.lng));
+      const p=scenarioV30StopPolar(s,depot);
+      const radial=p?Math.max(0,p.roadMiles-(ordered.length?scenarioV30StopPolar(ordered[ordered.length-1],depot)?.roadMiles||0:0)):0;
+      const score=d+Math.max(0,-radial)*0.35;
+      if(score<bs){bs=score;bi=i;}
+    });
+    const n=remaining.splice(bi,1)[0];ordered.push(n);cur={lat:parseFloat(n.lat),lng:parseFloat(n.lng)};
+  }
+  return scenarioOrderCustomersForSpecialRules(ordered);
+}
+function scenarioV30TryBoundaryMove(fromRoute,toRoute,stop,opts){
+  const fromBase=scenarioRouteCustomerStops(fromRoute.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+  const toBase=scenarioRouteCustomerStops(toRoute.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+  let best=null;
+  for(let i=0;i<=toBase.length;i++){
+    const cand=[...toBase];cand.splice(i,0,stop);
+    const ev=scenarioEvaluateRouteCustomers(toRoute,cand,opts);
+    if(ev.capacity.known&&!ev.capacity.ok)continue;
+    if(!scenarioRuntimeOk(ev.sim,opts,true))continue;
+    const score=ev.sim.miles+ev.sim.hours*4+scenarioSoftWaitPenalty(ev.sim,opts)/1000+ev.sim.late*10000;
+    if(!best||score<best.score)best={ev,score};
+  }
+  if(!best)return false;
+  stop.routeId=toRoute.id;scenarioApplyRouteOrder(toRoute.id,best.ev.order);
+  if(fromBase.length){const fe=scenarioEvaluateRouteCustomers(fromRoute,fromBase,opts);scenarioApplyRouteOrder(fromRoute.id,fe.order);} else reseq();
+  return true;
+}
+function scenarioV30GeographicRebalance(opts,stats){
+  let moves=0;
+  for(let pass=0;pass<5;pass++){
+    let changed=false;
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+    for(const route of active){
+      const sim=scenarioRouteRuntime(route),cap=scenarioCapacityStatus(route),lim=scenarioV28RuntimeLimits(route,opts);
+      const overloaded=(lim.max>0&&sim.hours>lim.max+1e-6)||(cap.known&&!cap.ok);
+      const customers=scenarioRouteCustomerStops(route.id).filter(s=>s.lat&&s.lng);
+      if(!customers.length)continue;
+      const dep=routeInitialDepot(route)||routeFinalDepot(route); if(!dep)continue;
+      const bearings=customers.map(s=>scenarioV30StopPolar(s,dep)?.bearing).filter(Number.isFinite);
+      const center=scenarioV30ClusterCenter(customers.map(s=>({stop:s,polar:scenarioV30StopPolar(s,dep),demand:scenarioV30StopDemand(s)})).filter(x=>x.polar));
+      const boundary=[...customers].sort((a,b)=>scenarioV30AngleDiff(scenarioV30StopPolar(b,dep)?.bearing||0,center.bearing)-scenarioV30AngleDiff(scenarioV30StopPolar(a,dep)?.bearing||0,center.bearing));
+      for(const stop of boundary.slice(0,Math.min(5,boundary.length))){
+        if(!scenarioStopCanChangeRoute(stop,opts))continue;
+        let target=null,best=Infinity;
+        for(const r2 of active){
+          if(r2.id===route.id||!scenarioDepotCompatible(stop,r2,opts))continue;
+          const d2=routeInitialDepot(r2)||routeFinalDepot(r2);if(!d2)continue;
+          const rs2=scenarioRouteCustomerStops(r2.id).filter(s=>s.lat&&s.lng);
+          const c2=scenarioV30ClusterCenter(rs2.map(s=>({stop:s,polar:scenarioV30StopPolar(s,d2),demand:scenarioV30StopDemand(s)})).filter(x=>x.polar));
+          const p=scenarioV30StopPolar(stop,d2);if(!p)continue;
+          const angle=scenarioV30AngleDiff(p.bearing,c2.bearing);
+          const score=angle*2+p.roadMiles*0.12+(scenarioRouteRuntime(r2).hours*3);
+          if(score<best){best=score;target=r2;}
+        }
+        if(target&&(overloaded||best<70)){
+          const snap=scenarioCaptureWorkingState();
+          if(scenarioV30TryBoundaryMove(route,target,stop,opts)){
+            const newFrom=scenarioRouteRuntime(route),newTo=scenarioRouteRuntime(target);
+            const good=(!lim.max||newFrom.hours<=lim.max+1e-6)&&scenarioRuntimeOk(newTo,opts,true);
+            if(good){moves++;changed=true;break;}else scenarioRestoreWorkingState(snap);
+          }
+        }
+      }
+    }
+    if(!changed)break;
+  }
+  if(stats)stats.boundaryMoves=(stats.boundaryMoves||0)+moves;
+  return moves;
+}
+function scenarioV30GeographicQuality(){
+  let spreads=[],longest=0,cross=0,active=0;
+  routes.forEach(r=>{
+    const rs=scenarioRouteCustomerStops(r.id).filter(s=>s.lat&&s.lng);if(!rs.length)return;active++;
+    const dep=routeInitialDepot(r)||routeFinalDepot(r);if(!dep)return;
+    const vals=rs.map(s=>scenarioV30StopPolar(s,dep)?.bearing).filter(Number.isFinite);const spread=scenarioV30CircularSpread(vals);spreads.push(spread);if(spread>130)cross++;
+    longest=Math.max(longest,scenarioRouteRuntime(r).miles||0);
+  });
+  return {activeRoutes:active,avgBearingSpread:spreads.length?spreads.reduce((a,b)=>a+b,0)/spreads.length:0,crossTerritoryRoutes:cross,longestRouteMiles:longest};
+}
+function scenarioV30BuildFromScratch(opts){
+  const stats={mode:'scratch',algorithm:'Bearing-aware geographic cluster-first + deep recovery',poolStops:0,poolCases:0,initialPlacedStops:0,initialPlacedCases:0,placedStops:0,placedCases:0,unassignedStops:0,unassignedCases:0,routesActivated:0,boundaryMoves:0,recoveredStops:0,recoveredCases:0,recoverySwaps:0,sequenceMoves:0,dispatchChanges:0,clustersBuilt:0};
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;stats.poolCases=pool.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+
+  const groups=new Map();
+  for(const stop of pool){
+    const key=scenarioV30GroupDepot(stop,opts)||'_ANY_';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(stop);
+  }
+  const unplaced=[];
+  for(const [depotKey,gStops] of groups){
+    let routePool=scenarioV30RoutesForDepot(depotKey,opts).filter(r=>!scenarioRouteIsProtectedLongHaul(r));
+    if(!routePool.length){unplaced.push(...gStops);continue;}
+    const depot=depotLocations.find(d=>scenarioNormalizeDepotKey(d.locationKey)===depotKey)||routeInitialDepot(routePool[0])||routeFinalDepot(routePool[0]);
+    if(!depot){unplaced.push(...gStops);continue;}
+    const geo=[],noGeo=[];
+    gStops.forEach(stop=>{const polar=scenarioV30StopPolar(stop,depot);if(polar)geo.push({stop,polar,demand:scenarioV30StopDemand(stop)});else noGeo.push(stop);});
+    // Use all available resources as initial sectors; downstream consolidation can retire extras.
+    const k=Math.max(1,Math.min(routePool.length,geo.length));
+    const caps=routePool.map(scenarioV30RouteResourceCapacity);
+    const clusters=scenarioV30BuildAngularClusters(geo,k,caps);stats.clustersBuilt+=clusters.length;
+    const assignment=scenarioV30AssignClustersToRoutes(clusters,routePool);
+    const assignedIds=new Set();
+    for(const pair of assignment.assigned){
+      const ordered=scenarioV30CompactOrder(pair.route,pair.cluster,opts);
+      ordered.forEach(s=>{s.routeId=pair.route.id;assignedIds.add(s.id);});
+      scenarioApplyRouteOrder(pair.route.id,scenarioComposePreservingDepots(pair.route.id,ordered));
+      stats.initialPlacedStops+=ordered.length;stats.initialPlacedCases+=ordered.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+    }
+    geo.filter(x=>!assignedIds.has(x.stop.id)).forEach(x=>unplaced.push(x.stop));unplaced.push(...noGeo);
+  }
+  stats.placedStops=stats.initialPlacedStops;stats.placedCases=stats.initialPlacedCases;
+
+  // Repair overloaded cluster boundaries before treating any customer as unassigned.
+  scenarioV30GeographicRebalance(opts,stats);
+  const earlyUnplaced=[...unplaced,...stops.filter(s=>!s.routeId&&pool.some(p=>p.id===s.id)&&!unplaced.some(u=>u.id===s.id))];
+  const uniq=[...new Map(earlyUnplaced.map(s=>[s.id,s])).values()];
+  uniq.forEach(s=>s.scenarioRemovedReason='');
+  const rec={placedStops:0,placedCases:0,movedStops:0,swaps:0};
+  let final=scenarioPlacePoolFreightFirst(uniq,opts,rec,{});
+  stats.recoveredStops+=rec.placedStops||0;stats.recoveredCases+=rec.placedCases||0;stats.recoverySwaps+=rec.swaps||0;
+
+  // Deep second-chance pass after compact sequencing and boundary cleanup.
+  routes.forEach(r=>{if(scenarioRouteHasCustomerWork(r.id)){const before=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');scenarioSequenceRoute(r.id,opts);const after=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');if(before!==after)stats.sequenceMoves++;}});
+  scenarioV30GeographicRebalance(opts,stats);
+  final.forEach(s=>s.scenarioRemovedReason='');
+  if(final.length){const rec2={placedStops:0,placedCases:0,movedStops:0,swaps:0};final=scenarioPlacePoolFreightFirst(final,opts,rec2,{});stats.recoveredStops+=rec2.placedStops||0;stats.recoveredCases+=rec2.placedCases||0;stats.recoverySwaps+=rec2.swaps||0;}
+
+  for(const stop of final){stop.routeId=null;stop.seq=0;stop.scenarioRemovedReason='Build From Scratch: no feasible route after geographic clustering and deep recovery';}
+  stats.unassignedStops=final.length;stats.unassignedCases=final.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  if(opts.optDispatch)routes.forEach(r=>{if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))return;const before=scenarioCurrentRouteSignature(r.id).dispatch;scenarioOptimizeDispatch(r,opts);if(scenarioCurrentRouteSignature(r.id).dispatch!==before)stats.dispatchChanges++;});
+  stats.geographicQuality=scenarioV30GeographicQuality();
+  return stats;
+}
+scenarioV28BuildFromScratch=scenarioV30BuildFromScratch;
+
+function scenarioV30ScratchQualityVerdict(original,modeled,scratch){
+  const freight=original.shippedCases>0?modeled.shippedCases/original.shippedCases*100:100;
+  const milePct=original.miles>0?(modeled.miles-original.miles)/original.miles*100:0;
+  const expensePct=(original.expense>0&&modeled.expense!=null)?(modeled.expense-original.expense)/original.expense*100:0;
+  const bad=freight<99||milePct>10||(original.expense>0&&expensePct>5);
+  return {bad,freight,milePct,expensePct};
+}
+
+// V30 Full Model: geographic scratch build + the mature downstream local optimizer.
+runScenarioModel = function(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  const opts=scenarioReadOptions();
+  if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();
+  stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+  scenarioBuildOptimizerBaselineSnapshot();
+  const removed=scenarioApplyFilters(opts);
+  scenarioCapturePostFilterTimingSnapshot(opts);
+  const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+  const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+  if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+  let scratch=null;
+  if(opts.optimizationMode==='scratch')scratch=scenarioV30BuildFromScratch(opts);
+  const network=scenarioV27IncrementalNetworkOptimize(opts);removed.networkAnalysis=network;removed.scratchBuild=scratch;
+  const consolidation=scenarioRunMultiCandidateConsolidation(opts);removed.consolidation=consolidation;
+  network.retirementReviewed=consolidation.routesReviewed||0;network.routesRetired=consolidation.retiredRoutes||0;network.retiredRoutes=(consolidation.retired||[]).map(x=>x.routeName||x.routeId);network.stopsReassigned+=(consolidation.movedStops||0);network.acceptedMoves.push(...(consolidation.retired||[]).map(x=>({type:'Route Retirement',customer:`${x.movedStops||0} stop(s) redistributed`,locationKey:'',from:x.routeName||x.routeId,to:(x.receivers||[]).map(id=>routeDisplayName(routes.find(r=>r.id===id))).filter(Boolean).join(', '),reason:'route consolidation'})));
+
+  if(opts.optimizationMode==='scratch'&&scratch)scenarioV29RetryScratchUnassigned(opts,scratch);
+  if(opts.optimizationMode==='scratch'&&scratch){scenarioV30GeographicRebalance(opts,scratch);scratch.geographicQuality=scenarioV30GeographicQuality();scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.unassignedStops=stops.filter(s=>!s.routeId&&/^Build From Scratch:/i.test(s.scenarioRemovedReason||'')).length;scratch.unassignedCases=stops.filter(s=>!s.routeId&&/^Build From Scratch:/i.test(s.scenarioRemovedReason||'')).reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);}
+
+  removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  if((removed.runtimeViolations?.length||0)||(removed.capacityViolations?.length||0)){
+    removed.targetedRepair=scenarioTargetedFeasibilityRepair(opts);
+    if(removed.targetedRepair?.accepted){network.stopsReassigned+=removed.targetedRepair.movedStops||0;network.localSequenceMoves+=removed.targetedRepair.sequenceRepairs||0;network.dispatchChanges+=removed.targetedRepair.dispatchRepairs||0;}
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  }else removed.targetedRepair=null;
+  const modeled=scenarioComputeModelMetrics(opts);
+  let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+  if(opts.optimizationMode==='scratch'){
+    const q=scenarioV30ScratchQualityVerdict(original,modeled,scratch);removed.scratchQualityGate=q;
+    if(q.bad)verdict.verdict='SCRATCH SOLUTION REJECTED — NO IMPROVED NETWORK FOUND';
+    else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='FROM-SCRATCH — FEASIBILITY WARNING';
+    else verdict.verdict='FROM-SCRATCH NETWORK BUILT';
+  }else{
+    if(verdict.verdict==='DEGRADED')verdict.verdict='INCREMENTAL MODEL — REVIEW';
+    else if(!removed.runtimeViolations.length&&!removed.capacityViolations.length&&(network.relocationsAccepted||network.swapsAccepted||network.routesRetired))verdict.verdict='IMPROVED — NETWORK OPTIMIZED';
+    else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';
+  }
+  const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:opts.optimizationMode==='scratch'?'Geographic Cluster-First Scratch + Incremental Network Optimizer v30':'Incremental Network Optimizer v30',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+  scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+
+const openScenarioAfterActionReportV30Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV30Base();
+  const r=scenarioLastRun;if(!r||r.mode!=='full'||r.options?.optimizationMode!=='scratch')return;
+  const s=r.removed?.scratchBuild;if(!s)return;
+  const body=document.getElementById('scenario-report-body');if(!body)return;
+  const retained=s.poolCases>0?Math.max(0,(s.poolCases-(s.unassignedCases||0))/s.poolCases*100):100;
+  const g=s.geographicQuality||{};const q=r.removed?.scratchQualityGate||{};
+  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;border-color:rgba(62,207,142,.35);"><h3>V30 Geographic Scratch Analysis</h3><div class="scenario-help">Scratch construction is now depot-centered and bearing-aware: contiguous geographic sectors are demand-balanced first, then sequenced, boundary-balanced, deeply recovered, and finally handed to the incremental network optimizer. Capacity is a hard constraint—not a reason to cross-haul distant territories.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${s.clustersBuilt||0}</div><div class="l">Geographic Clusters</div></div><div class="scenario-kpi"><div class="v">${s.boundaryMoves||0}</div><div class="l">Boundary Rebalances</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(g.avgBearingSpread||0,1)}°</div><div class="l">Avg Bearing Spread</div></div><div class="scenario-kpi"><div class="v">${g.crossTerritoryRoutes||0}</div><div class="l">Wide-Territory Routes</div></div></div><div class="scenario-note"><strong>Scratch Freight Retention:</strong> ${scenarioFmt(retained,1)}% · <strong>Final Unassigned:</strong> ${s.unassignedStops||0} stop(s) / ${scenarioFmt(s.unassignedCases||0,0)} cases · <strong>Routes Activated:</strong> ${s.routesActivated||0} · <strong>Longest Modeled Route:</strong> ${scenarioFmt(g.longestRouteMiles||0,1)} mi · <strong>Quality Gate:</strong> ${q.bad?'REJECTED':'PASSED'}${q.bad?` (freight ${scenarioFmt(q.freight||0,1)}%, miles ${q.milePct>=0?'+':''}${scenarioFmt(q.milePct||0,1)}%)`:''}.</div></div>`);
+};
+
+</script>
 </body>
 </html>
