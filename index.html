@@ -9707,5 +9707,264 @@ openScenarioAfterActionReport=function(){
 };
 
 </script>
+
+<script>
+// ============================================================
+// V31 — SPACE-TIME AWARE SCRATCH CONSTRUCTION
+// Keeps V30 geographic sectors, but makes time windows, resource
+// availability, runtime and capacity part of every construction decision.
+// ============================================================
+let scenarioV31ScratchActive=false;
+
+function scenarioV31ResourceWindow(route){
+  const start=scenarioEpochMinutes(route?.routeData?.routeStart||route?.routeSummaryStart||'');
+  const end=scenarioEpochMinutes(route?.routeData?.routeEnd||route?.routeSummaryEnd||'');
+  if(Number.isFinite(start)&&Number.isFinite(end)&&end>start)return {start,end};
+  const s=scenarioOriginalStart(route),lim=scenarioV28RuntimeLimits(route,{runtimeUseResourceMin:true,runtimeUseResourceMax:true});
+  return {start:s,end:Number.isFinite(s)&&lim.max>0?s+lim.max*60:null};
+}
+function scenarioV31RouteRawEvaluation(route,customers,startEpoch){
+  const customerOrder=scenarioOrderCustomersForSpecialRules(customers||[]);
+  const order=scenarioComposePreservingDepots(route.id,customerOrder);
+  const raw=scenarioEvaluateOrderedRoute(route,order,startEpoch);
+  const capacity=scenarioCapacityStatus(route,customerOrder);
+  return {order,sim:raw,rawSim:raw,capacity,customerOrder};
+}
+function scenarioV31WaitShape(sim,allowed){
+  let score=0,maxWait=0,over60=0;
+  for(const d of sim?.stops||[]){
+    if(d.layover)continue;
+    const w=Math.max(0,+d.wait||0);maxWait=Math.max(maxWait,w);
+    score+=w*150;
+    if(w>allowed)score+=(w-allowed)*1200;
+    if(w>15)score+=(w-15)*6000;
+    if(w>30)score+=(w-30)*18000;
+    if(w>60){score+=(w-60)*80000;over60++;}
+  }
+  return {score,maxWait,over60};
+}
+function scenarioV31BestDispatchForOrder(route,customers,opts,relaxed=false){
+  const order=scenarioComposePreservingDepots(route.id,scenarioOrderCustomersForSpecialRules(customers||[]));
+  const win=scenarioV31ResourceWindow(route);const orig=scenarioOriginalStart(route);
+  let starts=[];
+  if(opts.optDispatch){
+    const lo=Number.isFinite(win.start)?win.start:orig-120;
+    const hi=Number.isFinite(win.end)?Math.max(lo,win.end-30):orig+480;
+    for(let s=lo;s<=hi;s+=10)starts.push(s);
+    if(Number.isFinite(orig)&&!starts.some(x=>Math.abs(x-orig)<1))starts.push(orig);
+  }else starts=[orig];
+  let best=null;const allowed=Math.max(0,+opts.allowedWaitMinutes||5);
+  for(const start of starts){
+    if(!Number.isFinite(start))continue;
+    const sim=scenarioEvaluateOrderedRoute(route,order,start);
+    if(Number.isFinite(win.end)&&sim.endEpoch>win.end+1e-6)continue;
+    if(!scenarioRuntimeOk(sim,opts,true))continue;
+    const ws=scenarioV31WaitShape(sim,allowed);
+    if(!relaxed&&ws.maxWait>60+1e-6)continue;
+    if(relaxed&&ws.maxWait>120+1e-6)continue;
+    const score=(sim.late||0)*9e7+ws.score+sim.hours*(opts.optTime?6500:1200)+sim.miles*(opts.optMiles?350:80)+Math.abs(start-orig)*0.5;
+    if(!best||score<best.score)best={start,sim,order,score,wait:ws};
+  }
+  return best;
+}
+function scenarioV31WindowDifficulty(stop){
+  const w=scenarioStopWindow(stop);
+  const width=Number.isFinite(w.early)&&Number.isFinite(w.late)?Math.max(1,w.late-w.early):720;
+  const d=scenarioV30StopDemand(stop);
+  return (720/width)*5000+d.weight*0.15+d.cube*5+d.service*40;
+}
+function scenarioV31GeographicPenalty(route,customers,stop){
+  const dep=routeInitialDepot(route)||routeFinalDepot(route);if(!dep)return 0;
+  const list=[...(customers||[]),stop].filter(s=>s&&s.lat&&s.lng);
+  const bearings=list.map(s=>scenarioV30StopPolar(s,dep)?.bearing).filter(Number.isFinite);
+  const spread=scenarioV30CircularSpread(bearings);
+  const p=scenarioV30StopPolar(stop,dep);
+  return Math.max(0,spread-75)*450+(p?.roadMiles||0)*25;
+}
+function scenarioV31FindBestInsertion(stop,route,opts,relaxed=false){
+  if(!scenarioCanTargetRoute(stop,route,opts))return null;
+  const base=scenarioRouteCustomerStops(route.id).filter(s=>s.id!==stop.id).sort((a,b)=>a.seq-b.seq);
+  const cap=scenarioCapacityStatus(route,[...base,stop]);
+  if(!cap.known&&route.id!==scenarioOriginalRouteId(stop))return null;
+  if(cap.known&&!cap.ok)return null;
+  let best=null;
+  const positions=scenarioV28ScratchCandidatePositions(stop,base,opts);
+  for(const i of positions){
+    const cand=[...base];cand.splice(i,0,stop);
+    const ordered=scenarioOrderCustomersForSpecialRules(cand);
+    const disp=scenarioV31BestDispatchForOrder(route,ordered,opts,relaxed);if(!disp)continue;
+    const geo=scenarioV31GeographicPenalty(route,base,stop);
+    const score=disp.score+geo;
+    if(!best||score<best.score)best={route,customers:ordered,order:disp.order,sim:disp.sim,start:disp.start,score,wait:disp.wait};
+  }
+  return best;
+}
+function scenarioV31CommitPlacement(stop,best){
+  stop.routeId=best.route.id;stop.scenarioRemovedReason='';
+  scenarioApplyRouteOrder(best.route.id,best.order);
+  if(Number.isFinite(best.start)){
+    best.route.scenarioDispatchEpoch=best.start;
+    const d=new Date(best.start*60000);best.route.earliestStartTime=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');best.route.latestStartTime=best.route.earliestStartTime;
+  }
+}
+function scenarioV31CandidateRoutesForStop(stop,opts,preferredRoute=null){
+  const arr=routes.filter(r=>!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r)&&scenarioCanTargetRoute(stop,r,opts));
+  const depKey=scenarioV30GroupDepot(stop,opts);
+  let filtered=opts.keepAssignedDepot?arr.filter(r=>scenarioRoutePrimaryDepotKey(r)===depKey):arr;
+  if(preferredRoute&&filtered.some(r=>r.id===preferredRoute.id))filtered=[preferredRoute,...filtered.filter(r=>r.id!==preferredRoute.id)];
+  return filtered;
+}
+function scenarioV31PlaceStops(stopsToPlace,opts,preferredRouteMap=null,relaxed=false,stats=null){
+  const remaining=[...stopsToPlace];let placed=0,cases=0;
+  remaining.sort((a,b)=>scenarioV31WindowDifficulty(b)-scenarioV31WindowDifficulty(a));
+  const unplaced=[];
+  for(const stop of remaining){
+    const pref=preferredRouteMap?.get(stop.id)||null;
+    let best=null;
+    for(const route of scenarioV31CandidateRoutesForStop(stop,opts,pref)){
+      const cand=scenarioV31FindBestInsertion(stop,route,opts,relaxed);
+      if(cand&&(!best||cand.score<best.score))best=cand;
+    }
+    if(best){scenarioV31CommitPlacement(stop,best);placed++;cases+=scenarioStopShippedCases(stop)||tCases(stop)||0;}
+    else unplaced.push(stop);
+  }
+  if(stats){stats.timeAwarePlaced=(stats.timeAwarePlaced||0)+placed;stats.timeAwarePlacedCases=(stats.timeAwarePlacedCases||0)+cases;}
+  return unplaced;
+}
+
+// During scratch mode the imported-route hybrid delta is not valid because a
+// route can contain a completely different territory. Use the raw absolute
+// modeled timeline for scratch construction and reporting.
+const scenarioEvaluateRouteCustomersV31Base=scenarioEvaluateRouteCustomers;
+scenarioEvaluateRouteCustomers=function(route,customers,opts){
+  if(!scenarioV31ScratchActive)return scenarioEvaluateRouteCustomersV31Base(route,customers,opts);
+  const start=Number.isFinite(route.scenarioDispatchEpoch)?route.scenarioDispatchEpoch:scenarioOriginalStart(route);
+  return scenarioV31RouteRawEvaluation(route,customers,start);
+};
+const scenarioRouteRuntimeV31Base=scenarioRouteRuntime;
+scenarioRouteRuntime=function(route){
+  if(!scenarioV31ScratchActive)return scenarioRouteRuntimeV31Base(route);
+  const start=Number.isFinite(route.scenarioDispatchEpoch)?route.scenarioDispatchEpoch:scenarioOriginalStart(route);
+  const rs=stops.filter(s=>s.routeId===route.id&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);
+  return scenarioEvaluateOrderedRoute(route,rs,start);
+};
+
+function scenarioV31BuildFromScratch(opts){
+  scenarioV31ScratchActive=true;
+  const stats={mode:'scratch',algorithm:'Space-time aware geographic cluster-first + hard runtime insertion',poolStops:0,poolCases:0,clustersBuilt:0,timeAwarePlaced:0,timeAwarePlacedCases:0,initialPlacedStops:0,initialUnplaced:0,recoveredStops:0,recoverySwaps:0,unassignedStops:0,unassignedCases:0,routesActivated:0,dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0,boundaryMoves:0,sequenceMoves:0};
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;stats.poolCases=pool.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+
+  // Keep V30 contiguous bearing sectors, but use them only as preferred homes.
+  const prefMap=new Map();
+  const groups=new Map();
+  for(const stop of pool){const key=scenarioV30GroupDepot(stop,opts)||'_ANY_';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(stop);}
+  for(const [depotKey,gStops] of groups){
+    const routePool=scenarioV30RoutesForDepot(depotKey,opts).filter(r=>!scenarioRouteIsProtectedLongHaul(r));
+    if(!routePool.length)continue;
+    const depot=depotLocations.find(d=>scenarioNormalizeDepotKey(d.locationKey)===depotKey)||routeInitialDepot(routePool[0])||routeFinalDepot(routePool[0]);if(!depot)continue;
+    const geo=gStops.map(stop=>{const polar=scenarioV30StopPolar(stop,depot);return polar?{stop,polar,demand:scenarioV30StopDemand(stop)}:null;}).filter(Boolean);
+    const k=Math.max(1,Math.min(routePool.length,geo.length));
+    const clusters=scenarioV30BuildAngularClusters(geo,k,routePool.map(scenarioV30RouteResourceCapacity));stats.clustersBuilt+=clusters.length;
+    const assignment=scenarioV30AssignClustersToRoutes(clusters,routePool);
+    assignment.assigned.forEach(pair=>pair.cluster.forEach(x=>prefMap.set(x.stop.id,pair.route)));
+  }
+
+  // Primary construction: every insertion must fit capacity, resource availability,
+  // runtime and a 60-minute maximum candidate wait. Dispatch is optimized while
+  // evaluating the candidate when requested, not as an afterthought.
+  let unplaced=scenarioV31PlaceStops(pool,opts,prefMap,false,stats);
+  stats.initialPlacedStops=pool.length-unplaced.length;stats.initialUnplaced=unplaced.length;
+
+  // Second chance: allow up to 120 minutes of wait only while trying to retain
+  // freight. These candidates are still heavily penalized and quality-gated.
+  if(unplaced.length){
+    const before=unplaced.length;unplaced=scenarioV31PlaceStops(unplaced,opts,prefMap,true,stats);stats.recoveredStops+=before-unplaced.length;
+  }
+
+  // Improve only already-feasible routes. The normal incremental optimizer can
+  // then exchange boundaries without ever accepting a runtime/capacity failure.
+  routes.forEach(r=>{
+    if(!scenarioRouteHasCustomerWork(r.id))return;
+    const ev=scenarioRouteRuntime(r);if(!scenarioRuntimeOk(ev,opts,true))return;
+    const before=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');scenarioSequenceRoute(r.id,opts);const after=stops.filter(s=>s.routeId===r.id).map(s=>s.id+':'+s.seq).join('|');if(before!==after)stats.sequenceMoves++;
+  });
+
+  // Final freight recovery after local sequencing opens new insertion options.
+  if(unplaced.length){
+    const before=unplaced.length;unplaced=scenarioV31PlaceStops(unplaced,opts,null,true,stats);stats.recoveredStops+=before-unplaced.length;
+  }
+  for(const s of unplaced){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no space-time feasible route after deep recovery';}
+  stats.unassignedStops=unplaced.length;stats.unassignedCases=unplaced.reduce((a,s)=>a+(scenarioStopShippedCases(s)||tCases(s)||0),0);
+  stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+
+  if(opts.optDispatch){
+    routes.forEach(r=>{
+      if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))return;stats.dispatchRoutesEvaluated++;
+      const before=scenarioRouteRuntime(r),oldStart=Number.isFinite(r.scenarioDispatchEpoch)?r.scenarioDispatchEpoch:scenarioOriginalStart(r);
+      const customers=scenarioRouteCustomerStops(r.id).sort((a,b)=>a.seq-b.seq);
+      const best=scenarioV31BestDispatchForOrder(r,customers,opts,true);
+      if(best&&Math.abs(best.start-oldStart)>1){r.scenarioDispatchEpoch=best.start;const d=new Date(best.start*60000);r.earliestStartTime=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');r.latestStartTime=r.earliestStartTime;stats.dispatchChanges++;stats.dispatchWaitSaved+=Math.max(0,(before.waitMinutes||0)-(best.sim.waitMinutes||0));}
+    });
+  }
+  stats.geographicQuality=scenarioV30GeographicQuality();
+  stats.maxModeledWait=Math.max(0,...routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).map(r=>scenarioRouteRuntime(r).maxStopWaitMinutes||0));
+  return stats;
+}
+scenarioV30BuildFromScratch=scenarioV31BuildFromScratch;
+scenarioV28BuildFromScratch=scenarioV31BuildFromScratch;
+
+function scenarioV31ScratchQualityVerdict(original,modeled,scratch,removed){
+  const freight=original.shippedCases>0?modeled.shippedCases/original.shippedCases*100:100;
+  const milePct=original.miles>0?(modeled.miles-original.miles)/original.miles*100:0;
+  const hourPct=original.hours>0?(modeled.hours-original.hours)/original.hours*100:0;
+  const onTimeDelta=(modeled.onTimePct||0)-(original.onTimePct||0);
+  const waitPct=original.waitMinutes>0?((modeled.waitMinutes-original.waitMinutes)/original.waitMinutes*100):(modeled.waitMinutes>5?999:0);
+  const violations=(removed?.runtimeViolations?.length||0)+(removed?.capacityViolations?.length||0);
+  const bad=freight<99||milePct>10||hourPct>10||onTimeDelta<-2||waitPct>50||violations>0;
+  return {bad,freight,milePct,hourPct,onTimeDelta,waitPct,violations};
+}
+
+const scenarioRunScenarioModelV31Core=function(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+  if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();
+  stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+  scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);
+  const postFilterMetrics=scenarioComputePostFilterMetrics(opts);const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+  if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+  let scratch=null;if(opts.optimizationMode==='scratch')scratch=scenarioV31BuildFromScratch(opts);
+  const network=scenarioV27IncrementalNetworkOptimize(opts);removed.networkAnalysis=network;removed.scratchBuild=scratch;
+  const consolidation=scenarioRunMultiCandidateConsolidation(opts);removed.consolidation=consolidation;
+  network.retirementReviewed=consolidation.routesReviewed||0;network.routesRetired=consolidation.retiredRoutes||0;network.retiredRoutes=(consolidation.retired||[]).map(x=>x.routeName||x.routeId);network.stopsReassigned+=(consolidation.movedStops||0);
+  removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);
+  if((removed.runtimeViolations?.length||0)||(removed.capacityViolations?.length||0)){removed.targetedRepair=scenarioTargetedFeasibilityRepair(opts);removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);}else removed.targetedRepair=null;
+  const modeled=scenarioComputeModelMetrics(opts);let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+  if(opts.optimizationMode==='scratch'){
+    const q=scenarioV31ScratchQualityVerdict(original,modeled,scratch,removed);removed.scratchQualityGate=q;
+    verdict.verdict=q.bad?'SCRATCH SOLUTION REJECTED — NO IMPROVED NETWORK FOUND':'FROM-SCRATCH NETWORK BUILT';
+  }else{
+    scenarioV31ScratchActive=false;
+    if(verdict.verdict==='DEGRADED')verdict.verdict='INCREMENTAL MODEL — REVIEW';else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';else verdict.verdict='IMPROVED — NETWORK OPTIMIZED';
+  }
+  const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+  scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:opts.optimizationMode==='scratch'?'Space-Time Aware Geographic Scratch v31':'Incremental Network Optimizer v31',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+  scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+runScenarioModel=function(){
+  try{return scenarioRunScenarioModelV31Core();}catch(err){console.error('Run Model failed:',err);showToast('Run Model error: '+((err&&err.message)||err));}
+};
+
+const openScenarioAfterActionReportV31Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV31Base();const r=scenarioLastRun;if(!r||r.options?.optimizationMode!=='scratch')return;const s=r.removed?.scratchBuild;if(!s)return;const body=document.getElementById('scenario-report-body');if(!body)return;
+  const q=r.removed?.scratchQualityGate||{};
+  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;border-color:rgba(59,130,246,.45);"><h3>V31 Space-Time Scratch Analysis</h3><div class="scenario-help">Every scratch insertion is now evaluated against geography, customer windows, resource availability, hard runtime and truck capacity at the same time. Candidate dispatch time is evaluated during construction when Dispatch Optimization is enabled. Stops generating more than 60 minutes of wait are rejected during the primary build and only considered up to 120 minutes during freight-recovery attempts.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${s.timeAwarePlaced||0}</div><div class="l">Time-Aware Placements</div></div><div class="scenario-kpi"><div class="v">${s.unassignedStops||0}</div><div class="l">Final Unassigned</div></div><div class="scenario-kpi"><div class="v">${s.dispatchChanges||0}/${s.dispatchRoutesEvaluated||0}</div><div class="l">Dispatch Changed / Evaluated</div></div><div class="scenario-kpi"><div class="v">${scenarioFormatHMSFromMinutes(s.dispatchWaitSaved||0)}</div><div class="l">Dispatch Wait Saved</div></div></div><div class="scenario-note"><strong>Maximum modeled stop wait:</strong> ${scenarioFmt(s.maxModeledWait||0,1)} min · <strong>Remaining feasibility violations:</strong> ${q.violations||0} · <strong>On-Time delta:</strong> ${(q.onTimeDelta||0)>=0?'+':''}${scenarioFmt(q.onTimeDelta||0,1)} pts · <strong>Miles delta:</strong> ${(q.milePct||0)>=0?'+':''}${scenarioFmt(q.milePct||0,1)}% · <strong>Quality Gate:</strong> ${q.bad?'REJECTED':'PASSED'}.</div></div>`);
+};
+</script>
+
 </body>
 </html>
