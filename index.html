@@ -9543,7 +9543,7 @@ function scenarioV30GeographicRebalance(opts,stats){
           if(score<best){best=score;target=r2;}
         }
         if(target&&(overloaded||best<70)){
-          const snap=scenarioCaptureWorkingState();
+          const snap=scenarioSnapshotWorkingState();
           if(scenarioV30TryBoundaryMove(route,target,stop,opts)){
             const newFrom=scenarioRouteRuntime(route),newTo=scenarioRouteRuntime(target);
             const good=(!lim.max||newFrom.hours<=lim.max+1e-6)&&scenarioRuntimeOk(newTo,opts,true);
@@ -9635,7 +9635,7 @@ function scenarioV30ScratchQualityVerdict(original,modeled,scratch){
 }
 
 // V30 Full Model: geographic scratch build + the mature downstream local optimizer.
-runScenarioModel = function(){
+const scenarioRunScenarioModelV30Core = function(){
   if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
   const opts=scenarioReadOptions();
   if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
@@ -9678,6 +9678,21 @@ runScenarioModel = function(){
   const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
   scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:opts.optimizationMode==='scratch'?'Geographic Cluster-First Scratch + Incremental Network Optimizer v30':'Incremental Network Optimizer v30',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
   scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+
+// V30.1: surface unexpected model errors instead of silently returning to/no-op in the UI.
+runScenarioModel = function(){
+  try{
+    return scenarioRunScenarioModelV30Core();
+  }catch(err){
+    console.error('Run Model failed:',err);
+    const msg=(err&&err.message)?err.message:String(err||'Unknown error');
+    showToast('Run Model error: '+msg);
+    const note=document.querySelector('#scenario-levers-modal .scenario-note');
+    if(note){
+      note.insertAdjacentHTML('afterend',`<div id="scenario-run-error" class="scenario-note" style="margin-top:8px;border-color:var(--danger);color:#fecaca;"><strong>Run Model could not complete:</strong> ${escapeHtml(msg)}</div>`);
+    }
+  }
 };
 
 const openScenarioAfterActionReportV30Base=openScenarioAfterActionReport;
