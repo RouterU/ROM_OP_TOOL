@@ -525,6 +525,7 @@ body{background:var(--bg0);color:var(--text1);}
       <div class="quadrant" id="q-routes" style="flex:1;min-height:120px;">
         <div class="q-header">
           <span class="q-title">Routes</span>
+          <button class="btn warn" style="padding:2px 7px;font-size:9px;" onclick="unassignAllCustomerStopsFromRoutes()" title="Move every currently assigned non-depot stop from all routes to Unassigned">Unassign All Stops</button>
           <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="showSelectedRoutesOnMap()">Show Selected</button>
           <input id="route-number-filter" class="route-number-filter" type="search" list="route-number-options" placeholder="Route Number" title="Select or enter a Route Number (UDFNumber1)" oninput="setRouteNumberFilter(this.value)"/>
           <datalist id="route-number-options"></datalist>
@@ -3675,6 +3676,22 @@ function manifestDrop(e,targetStopId){
   renderRouteManifest();
   showToast('Route sequence updated');
 }
+function unassignAllCustomerStopsFromRoutes(){
+  const assigned=stops.filter(s=>s.routeId && !scenarioIsDepotStop(s));
+  if(!assigned.length){showToast('No assigned customer stops to unassign');return;}
+  const routeCount=new Set(assigned.map(s=>s.routeId).filter(Boolean)).size;
+  if(!confirm(`Unassign all ${assigned.length} assigned stops from ${routeCount} route${routeCount===1?'':'s'}?\n\nDepot locations will remain on their routes.`))return;
+  assigned.forEach(s=>{
+    s.routeId=null;
+    s.seq=0;
+    s.uiChecked=false;
+  });
+  reseq();
+  render();
+  if(activeManifestRouteId)renderRouteManifest();
+  showToast(`Unassigned ${assigned.length} stops from ${routeCount} route${routeCount===1?'':'s'}; depots retained`);
+}
+
 function unassignAllStopsFromManifest(){
   if(!activeManifestRouteId)return;
   const route=routes.find(r=>r.id===activeManifestRouteId);
