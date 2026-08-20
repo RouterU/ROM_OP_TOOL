@@ -10674,6 +10674,153 @@ openScenarioAfterActionReport=function(){
       </div>
     </div>`);
 };
+
+
+// ============================================================================
+// V33 — TERRITORY-FIRST, FREIGHT-PROTECTED SCRATCH
+// ============================================================================
+// V33 keeps V32.2's bounded/browser-safe search, but changes scratch scoring so
+// geography and freight retention are first-class constraints. The intent is
+// to prevent legal-but-inefficient cross-hauls while protecting large/difficult
+// customers from being stranded late in construction.
+
+let scenarioV33TerritoryStats=null;
+
+function scenarioV33Bearing(stop,dep){
+  if(!stop||!dep||!Number.isFinite(+stop.lat)||!Number.isFinite(+stop.lng)||!Number.isFinite(+dep.lat)||!Number.isFinite(+dep.lng))return null;
+  const a=+dep.lat*Math.PI/180,b=+stop.lat*Math.PI/180,dl=(+stop.lng-+dep.lng)*Math.PI/180;
+  let br=Math.atan2(Math.sin(dl)*Math.cos(b),Math.cos(a)*Math.sin(b)-Math.sin(a)*Math.cos(b)*Math.cos(dl))*180/Math.PI;
+  return (br+360)%360;
+}
+function scenarioV33AngleDiff(a,b){
+  if(!Number.isFinite(a)||!Number.isFinite(b))return 0;
+  let d=Math.abs(a-b)%360;return d>180?360-d:d;
+}
+function scenarioV33RouteTerritory(route,customers){
+  const dep=routeInitialDepot(route)||routeFinalDepot(route);
+  const list=(customers||scenarioV32RouteCustomers(route.id)).filter(s=>Number.isFinite(+s.lat)&&Number.isFinite(+s.lng));
+  if(!dep||!list.length)return {bearing:null,spread:0,radius:0,dep};
+  const pts=list.map(s=>({s,b:scenarioV33Bearing(s,dep),r:scenarioV32Miles(dep,s)})).filter(x=>Number.isFinite(x.b));
+  if(!pts.length)return {bearing:null,spread:0,radius:0,dep};
+  const sx=pts.reduce((a,x)=>a+Math.cos(x.b*Math.PI/180),0),sy=pts.reduce((a,x)=>a+Math.sin(x.b*Math.PI/180),0);
+  const bearing=(Math.atan2(sy,sx)*180/Math.PI+360)%360;
+  const spread=Math.max(...pts.map(x=>scenarioV33AngleDiff(x.b,bearing)))*2;
+  const radius=Math.max(...pts.map(x=>Number.isFinite(x.r)?x.r:0));
+  return {bearing,spread,radius,dep};
+}
+function scenarioV33TerritoryPenalty(route,base,stop){
+  if(!base||base.length<2)return 0;
+  const t=scenarioV33RouteTerritory(route,base), sb=scenarioV33Bearing(stop,t.dep);
+  if(!Number.isFinite(t.bearing)||!Number.isFinite(sb))return 0;
+  const angle=scenarioV33AngleDiff(sb,t.bearing);
+  const dist=scenarioV32Miles(t.dep,stop);
+  let p=0;
+  // Strongly discourage leaving a route's established radial territory.
+  if(angle>38)p+=Math.pow(angle-38,2)*5200;
+  if(angle>70)p+=(angle-70)*180000;
+  // Long radial additions are allowed when they continue the same corridor,
+  // but become expensive when combined with a large angular departure.
+  if(Number.isFinite(dist)&&dist>t.radius+12&&angle>28)p+=(dist-t.radius-12)*65000;
+  return p;
+}
+function scenarioV33FreightPriority(stop,opts){
+  const cases=scenarioV32Cases(stop)||0;
+  const d=scenarioV30StopDemand(stop)||{};
+  const w=scenarioStopWindow(stop), width=Number.isFinite(w.early)&&Number.isFinite(w.late)?Math.max(30,w.late-w.early):720;
+  let depDist=0;
+  try{const key=scenarioV30GroupDepot(stop,opts),dep=depotLocations.find(x=>scenarioNormalizeDepotKey(x.locationKey)===key);if(dep)depDist=scenarioV32Miles(dep,stop)||0;}catch(e){}
+  // Cases dominate, then tight windows / cube / weight / remoteness.
+  return cases*180000 + (720/width)*900000 + (d.cube||0)*7000 + (d.weight||0)*90 + depDist*18000 + scenarioV321QuickDifficulty(stop);
+}
+
+const scenarioV33InsertionBase=scenarioV322Insertion;
+function scenarioV33Insertion(stop,route,opts,relaxed=false){
+  const cand=scenarioV33InsertionBase(stop,route,opts,relaxed);
+  if(!cand)return null;
+  const base=scenarioV32RouteCustomers(route.id).filter(s=>s.id!==stop.id);
+  const territoryPenalty=scenarioV33TerritoryPenalty(route,base,stop);
+  const after=scenarioV33RouteTerritory(route,cand.customers);
+  // Once a route has a real territory, very wide fans are effectively a hard
+  // constraint unless this is recovery mode and no better legal home exists.
+  if(base.length>=3 && after.spread>125 && !relaxed)return null;
+  cand.territoryPenalty=territoryPenalty;
+  cand.score+=territoryPenalty + Math.max(0,after.spread-82)*42000;
+  return cand;
+}
+scenarioV322Insertion=scenarioV33Insertion;
+scenarioV32Insertion=scenarioV33Insertion;
+
+function scenarioV33TerritoryAnalysis(){
+  let cross=0,crossMiles=0,wide=0,maxSpread=0,totalSpread=0,n=0,worst=[];
+  for(const r of routes){
+    const cs=scenarioV32RouteCustomers(r.id);if(!cs.length)continue;
+    const t=scenarioV33RouteTerritory(r,cs);n++;totalSpread+=t.spread;maxSpread=Math.max(maxSpread,t.spread);
+    if(t.spread>100)wide++;
+    let routeCross=0;
+    for(const s of cs){
+      const b=scenarioV33Bearing(s,t.dep),a=scenarioV33AngleDiff(b,t.bearing),d=scenarioV32Miles(t.dep,s)||0;
+      if(a>65){cross++;routeCross+=d;crossMiles+=d;}
+    }
+    if(routeCross>0)worst.push({route:r.name||r.id,miles:routeCross,spread:t.spread});
+  }
+  worst.sort((a,b)=>b.miles-a.miles);
+  return {crossTerritoryStops:cross,estimatedCrossHaulMiles:crossMiles,wideTerritoryRoutes:wide,avgBearingSpread:n?totalSpread/n:0,maxBearingSpread:maxSpread,worst:worst.slice(0,5)};
+}
+
+function scenarioV33BuildFromScratch(opts){
+  scenarioV31ScratchActive=true;
+  scenarioV322RecoveryDeadline=0;scenarioV322InsertionEvaluations=0;scenarioV322FallbackScans=0;
+  const startMs=performance.now();
+  const stats={mode:'scratch',algorithm:'V33 territory-first freight-protected bounded scratch',poolStops:0,poolCases:0,difficultFirstPlacements:0,initialPlacedStops:0,initialUnassigned:0,initialUnplacedStops:0,unassignedStops:0,unassignedCases:0,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0,routesActivated:0,routesRetired:0,dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0,primaryBuildSeconds:0,recoverySeconds:0,insertionEvaluations:0,fallbackScans:0,recoveryBudgetSeconds:22,recoveryBudgetExceeded:false};
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;stats.poolCases=pool.reduce((a,s)=>a+scenarioV32Cases(s),0);
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+  stats.shapeBefore=scenarioV32NetworkShape();
+
+  // Freight-first: high-case, difficult, tight-window and remote customers establish
+  // route territories first. Later customers naturally fill the nearest corridor.
+  const ranked=pool.map(s=>({s,score:scenarioV33FreightPriority(s,opts)})).sort((a,b)=>b.score-a.score);
+  let unassigned=[];
+  for(const x of ranked){
+    const best=scenarioV322FindPlacement(x.s,opts,false,true);
+    if(best){scenarioV31CommitPlacement(x.s,best);stats.difficultFirstPlacements++;}
+    else unassigned.push(x.s);
+  }
+  stats.primaryBuildSeconds=(performance.now()-startMs)/1000;stats.initialUnassigned=unassigned.length;stats.initialUnplacedStops=unassigned.length;stats.initialPlacedStops=stats.difficultFirstPlacements;
+
+  // Protect the most freight during recovery: largest unassigned customers first.
+  unassigned.sort((a,b)=>scenarioV33FreightPriority(b,opts)-scenarioV33FreightPriority(a,opts));
+  const recStart=performance.now();scenarioV322RecoveryDeadline=recStart+stats.recoveryBudgetSeconds*1000;
+  for(let pass=0;pass<2&&unassigned.length&&scenarioV322RecoveryTimeLeft();pass++){
+    const next=[];let recovered=0;
+    for(const s of unassigned){if(!scenarioV322RecoveryTimeLeft()){next.push(s);continue;}if(scenarioV322TryEjection(s,opts,stats,2))recovered++;else next.push(s);}
+    unassigned=next;if(!recovered)break;
+  }
+  stats.recoveryBudgetExceeded=!scenarioV322RecoveryTimeLeft()&&unassigned.length>0;stats.recoverySeconds=(performance.now()-recStart)/1000;scenarioV322RecoveryDeadline=0;
+  for(const s of unassigned){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no feasible placement after V33 territory/freight recovery';}
+  stats.unassignedStops=unassigned.length;stats.unassignedCases=unassigned.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;stats.shapeAfterConstruction=scenarioV32NetworkShape();stats.insertionEvaluations=scenarioV322InsertionEvaluations;stats.fallbackScans=scenarioV322FallbackScans;stats.timeAwarePlaced=stats.difficultFirstPlacements;stats.budgetExceeded=stats.recoveryBudgetExceeded;stats.performanceBudgetSeconds=stats.recoveryBudgetSeconds;
+  stats.territoryAnalysis=scenarioV33TerritoryAnalysis();scenarioV33TerritoryStats=stats.territoryAnalysis;
+  return stats;
+}
+scenarioV32BuildFromScratch=scenarioV33BuildFromScratch;
+scenarioV30BuildFromScratch=scenarioV33BuildFromScratch;
+scenarioV28BuildFromScratch=scenarioV33BuildFromScratch;
+
+// V33 reporting: use the authoritative final modeled freight denominator and
+// expose cross-haul diagnostics so visual route quality can be verified numerically.
+const openScenarioAfterActionReportV33Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV33Base();
+  const r=scenarioLastRun,s=r?.removed?.scratchBuild;if(!r||r.options?.optimizationMode!=='scratch'||!s)return;
+  const body=document.getElementById('scenario-report-body');if(!body)return;
+  for(const h of [...body.querySelectorAll('h3')]){if(/^V32\.2 Construction Performance/.test((h.textContent||'').trim()))h.closest('.scenario-card')?.remove();}
+  const authoritativeRetention=r.original?.shippedCases>0?(r.modeled?.shippedCases||0)/r.original.shippedCases*100:100;
+  const t=s.territoryAnalysis||scenarioV33TerritoryAnalysis();
+  const worst=(t.worst||[]).map(x=>`${escapeHtml(String(x.route))}: ${scenarioFmt(x.miles,1)} mi / ${scenarioFmt(x.spread,1)}°`).join(' · ')||'None';
+  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;border-color:rgba(59,130,246,.55);"><h3>V33 Territory / Freight Protection Analysis</h3><div class="scenario-help">Scratch construction now establishes compact depot-centered route territories with high-case/difficult freight first. Cross-territory moves are strongly penalized and very wide route fans are blocked during normal construction; bounded recovery may relax the rule only to protect otherwise unassigned freight.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(authoritativeRetention,1)}%</div><div class="l">Final Freight Retention</div></div><div class="scenario-kpi"><div class="v">${t.crossTerritoryStops||0}</div><div class="l">Cross-Territory Stops</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(t.estimatedCrossHaulMiles||0,1)}</div><div class="l">Cross-Haul Radial Miles</div></div><div class="scenario-kpi"><div class="v">${t.wideTerritoryRoutes||0}</div><div class="l">Wide-Territory Routes</div></div></div><div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Unassigned:</strong> ${s.initialUnassigned||0} → ${s.unassignedStops||0} · <strong>Avg bearing spread:</strong> ${scenarioFmt(t.avgBearingSpread||0,1)}° · <strong>Max spread:</strong> ${scenarioFmt(t.maxBearingSpread||0,1)}° · <strong>Recovery:</strong> ${scenarioFmt(s.recoverySeconds||0,1)} sec${s.recoveryBudgetExceeded?' (budget exhausted)':''}.<br><strong>Worst territory routes:</strong> ${worst}</div></div>`);
+};
+
 </script>
 
 </body>
