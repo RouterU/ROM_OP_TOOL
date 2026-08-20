@@ -10069,5 +10069,213 @@ openScenarioAfterActionReport=function(){openScenarioAfterActionReportV32Base();
 };
 </script>
 
+
+<script>
+// ============================================================
+// V32.1 — PERFORMANCE GUARDRAILS
+// Prevents V32 scratch recovery from creating exponential
+// candidate/ejection searches that can lock the browser UI.
+// ============================================================
+let scenarioV321Deadline = 0;
+let scenarioV321BudgetExceeded = false;
+
+function scenarioV321TimeLeft(){
+  return !scenarioV321Deadline || performance.now() < scenarioV321Deadline;
+}
+function scenarioV321QuickDifficulty(stop){
+  const w=scenarioStopWindow(stop);
+  const width=(Number.isFinite(w.early)&&Number.isFinite(w.late))?Math.max(1,w.late-w.early):720;
+  const d=scenarioV30StopDemand(stop);
+  const depKey=scenarioV30GroupDepot(stop,{keepAssignedDepot:true});
+  const dep=depotLocations.find(x=>scenarioNormalizeDepotKey(x.locationKey)===depKey);
+  const dist=dep&&stop?.lat&&stop?.lng?scenarioV32Miles(dep,stop):0;
+  // Tight windows, high demand, and remote stops first — without running a
+  // full route simulation against every route just to rank the pool.
+  return (720/width)*1e7 + (d.weight||0)*100 + (d.cube||0)*6000 + (Number.isFinite(dist)?dist:0)*12000;
+}
+function scenarioV321RouteDistanceToStop(route,stop){
+  const customers=scenarioV32RouteCustomers(route.id);
+  const c=scenarioV32Centroid(customers);
+  const ref=c || routeInitialDepot(route) || routeFinalDepot(route) || stop;
+  const d=scenarioV32Miles(stop,ref);
+  return Number.isFinite(d)?d:1e9;
+}
+function scenarioV321CandidateRoutes(stop,opts,activeOnly=false,limit=7){
+  let arr=scenarioV31CandidateRoutesForStop(stop,opts,null) || [];
+  if(activeOnly) arr=arr.filter(r=>scenarioRouteHasCustomerWork(r.id));
+  arr=arr.slice().sort((a,b)=>scenarioV321RouteDistanceToStop(a,stop)-scenarioV321RouteDistanceToStop(b,stop));
+  return arr.slice(0,Math.max(1,limit));
+}
+function scenarioV32BestPlacement(stop,opts,relaxed=false,activeOnly=false){
+  let best=null;
+  const candidates=scenarioV321CandidateRoutes(stop,opts,activeOnly,activeOnly?7:8);
+  for(const r of candidates){
+    if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;break;}
+    const c=scenarioV32Insertion(stop,r,opts,relaxed);
+    if(c&&(!best||c.score<best.score))best=c;
+  }
+  return best;
+}
+function scenarioV32ActivateFor(stop,opts,stats){
+  const dormant=scenarioV321CandidateRoutes(stop,opts,false,8).filter(r=>!scenarioRouteHasCustomerWork(r.id));
+  let best=null;
+  for(const r of dormant){
+    if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;break;}
+    const c=scenarioV32Insertion(stop,r,opts,false);
+    if(c&&(!best||c.score<best.score))best=c;
+  }
+  if(best){scenarioV31CommitPlacement(stop,best);stats.routesActivated++;return true;}
+  return false;
+}
+function scenarioV32TryEjection(target,opts,stats,depth=2){
+  if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;return false;}
+
+  const direct=scenarioV32BestPlacement(target,opts,true,false);
+  if(direct){
+    scenarioV31CommitPlacement(target,direct);
+    stats.freightRecoveredCases+=scenarioV32Cases(target);
+    return true;
+  }
+
+  // Keep recovery bounded. The previous version could recursively search
+  // ~13 routes × 7 eject candidates × several depths for each unassigned stop.
+  const receiving=scenarioV321CandidateRoutes(target,opts,false,5);
+  for(const r of receiving){
+    if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;return false;}
+    const incumbents=scenarioV32RouteCustomers(r.id)
+      .slice()
+      .sort((a,b)=>scenarioV321QuickDifficulty(a)-scenarioV321QuickDifficulty(b))
+      .slice(0,3);
+
+    for(const eject of incumbents){
+      if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;return false;}
+      const snap=scenarioSnapshotWorkingState();
+      eject.routeId=null;eject.seq=0;
+      const ins=scenarioV32Insertion(target,r,opts,true);
+
+      if(ins){
+        scenarioV31CommitPlacement(target,ins);
+        const moved=scenarioV32BestPlacement(eject,opts,true,false);
+        if(moved){
+          scenarioV31CommitPlacement(eject,moved);
+          stats.ejectionMoves+=2;
+          stats.ejectionChains++;
+          stats.freightRecoveredCases+=scenarioV32Cases(target);
+          return true;
+        }
+        if(depth>1 && scenarioV32TryEjection(eject,opts,stats,depth-1)){
+          stats.ejectionMoves++;
+          stats.ejectionChains++;
+          stats.freightRecoveredCases+=scenarioV32Cases(target);
+          return true;
+        }
+      }
+      scenarioRestoreWorkingState(snap);
+    }
+  }
+  return scenarioV32ActivateFor(target,opts,stats);
+}
+function scenarioV32BuildFromScratch(opts){
+  scenarioV31ScratchActive=true;
+  scenarioV321BudgetExceeded=false;
+  // Hard wall-clock guardrail for the expensive scratch-construction stage.
+  // Downstream local optimization still runs afterward.
+  scenarioV321Deadline=performance.now()+12000;
+
+  const stats={
+    mode:'scratch',
+    algorithm:'V32.1 bounded customer-first + ejection recovery',
+    poolStops:0,poolCases:0,difficultFirstPlacements:0,
+    initialUnassigned:0,unassignedStops:0,unassignedCases:0,
+    freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0,
+    routesActivated:0,routesRetired:0,
+    dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0,
+    performanceBudgetSeconds:12,budgetExceeded:false
+  };
+
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;
+  stats.poolCases=pool.reduce((a,s)=>a+scenarioV32Cases(s),0);
+
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{
+    delete r.scenarioDispatchEpoch;
+    r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;
+  });
+
+  stats.shapeBefore=scenarioV32NetworkShape();
+
+  // Cheap first-pass ranking avoids thousands of full route simulations merely
+  // to calculate "feasible home count" for every customer.
+  const ranked=pool
+    .map(s=>({s,score:scenarioV321QuickDifficulty(s)}))
+    .sort((a,b)=>b.score-a.score);
+
+  let unassigned=[];
+  for(const x of ranked){
+    if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;unassigned.push(x.s);continue;}
+    let best=scenarioV32BestPlacement(x.s,opts,false,true);
+    if(best){
+      scenarioV31CommitPlacement(x.s,best);
+      stats.difficultFirstPlacements++;
+      continue;
+    }
+    if(scenarioV32ActivateFor(x.s,opts,stats)){
+      stats.difficultFirstPlacements++;
+      continue;
+    }
+    unassigned.push(x.s);
+  }
+
+  stats.initialUnassigned=unassigned.length;
+
+  // Two bounded recovery passes, recursion depth capped at 2.
+  for(let pass=0;pass<2 && unassigned.length && scenarioV321TimeLeft();pass++){
+    const next=[];
+    for(const s of unassigned){
+      if(!scenarioV321TimeLeft()){scenarioV321BudgetExceeded=true;next.push(s);continue;}
+      if(!scenarioV32TryEjection(s,opts,stats,2)) next.push(s);
+    }
+    if(next.length===unassigned.length){unassigned=next;break;}
+    unassigned=next;
+  }
+
+  for(const s of unassigned){
+    s.routeId=null;s.seq=0;
+    s.scenarioRemovedReason='Build From Scratch: no feasible placement within bounded V32.1 recovery search';
+  }
+
+  stats.unassignedStops=unassigned.length;
+  stats.unassignedCases=unassigned.reduce((a,s)=>a+scenarioV32Cases(s),0);
+  stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  stats.shapeAfterConstruction=scenarioV32NetworkShape();
+  stats.budgetExceeded=scenarioV321BudgetExceeded;
+  scenarioV321Deadline=0;
+  return stats;
+}
+scenarioV30BuildFromScratch=scenarioV32BuildFromScratch;
+scenarioV28BuildFromScratch=scenarioV32BuildFromScratch;
+
+// Add a visible performance note to the V32 report.
+const openScenarioAfterActionReportV321Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV321Base();
+  const r=scenarioLastRun, s=r?.removed?.scratchBuild;
+  if(!r||r.options?.optimizationMode!=='scratch'||!s)return;
+  const body=document.getElementById('scenario-report-body');
+  if(!body)return;
+  body.insertAdjacentHTML('beforeend',
+    `<div class="scenario-card" style="margin-top:10px;border-color:${s.budgetExceeded?'rgba(245,158,11,.55)':'rgba(62,207,142,.45)'};">
+      <h3>V32.1 Performance Guardrail</h3>
+      <div class="scenario-help">
+        Scratch construction uses bounded route candidates, bounded ejection chains, and a ${s.performanceBudgetSeconds||12}-second construction search budget so the browser cannot enter an exponential recovery search.
+      </div>
+      <div class="scenario-note" style="margin-top:7px;">
+        <strong>Construction budget exhausted:</strong> ${s.budgetExceeded?'Yes — best solution found within budget was retained':'No'}
+      </div>
+    </div>`);
+};
+</script>
+
 </body>
 </html>
