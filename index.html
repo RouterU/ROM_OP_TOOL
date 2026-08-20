@@ -9972,13 +9972,17 @@ openScenarioAfterActionReport=function(){
 // ============================================================
 function scenarioV32RouteCustomers(routeId){return scenarioRouteCustomerStops(routeId).sort((a,b)=>a.seq-b.seq);}
 function scenarioV32Cases(s){return scenarioStopShippedCases(s)||tCases(s)||0;}
+function scenarioV32Miles(a,b){
+  if(!a||!b||!Number.isFinite(+a.lat)||!Number.isFinite(+a.lng)||!Number.isFinite(+b.lat)||!Number.isFinite(+b.lng))return Infinity;
+  return roadAdjustedMiles(haversine(+a.lat,+a.lng,+b.lat,+b.lng));
+}
 function scenarioV32RouteShape(route,customers){
   const dep=routeInitialDepot(route)||routeFinalDepot(route), list=(customers||[]).filter(s=>s&&s.lat&&s.lng);
   if(!dep||!list.length)return {compactness:0,backtracking:0,bearingSpread:0,score:0};
   const polar=list.map(s=>scenarioV30StopPolar(s,dep)).filter(Boolean), spread=scenarioV30CircularSpread(polar.map(p=>p.bearing));
   const radii=polar.map(p=>p.roadMiles||0);let back=0;
   for(let i=1;i<radii.length;i++)if(radii[i]+3<radii[i-1])back+=radii[i-1]-radii[i];
-  let pair=0,n=0;for(let i=0;i<list.length;i++)for(let j=i+1;j<list.length;j++){pair+=scenarioRoadMilesBetweenStops(list[i],list[j]);n++;}
+  let pair=0,n=0;for(let i=0;i<list.length;i++)for(let j=i+1;j<list.length;j++){pair+=scenarioV32Miles(list[i],list[j]);n++;}
   const compact=n?pair/n:0,score=compact*1500+back*9000+Math.max(0,spread-80)*12000;
   return {compactness:compact,backtracking:back,bearingSpread:spread,score};
 }
@@ -9986,7 +9990,7 @@ function scenarioV32Centroid(customers){const a=(customers||[]).filter(s=>s.lat&
 function scenarioV32OverlapPenalty(route,customers,stop){
   const mine=scenarioV32Centroid([...(customers||[]),stop]);if(!mine)return 0;let penalty=0;
   for(const other of routes){if(other.id===route.id||!scenarioRouteHasCustomerWork(other.id))continue;const oc=scenarioV32Centroid(scenarioV32RouteCustomers(other.id));if(!oc)continue;
-    const dMine=scenarioRoadMilesBetweenStops(stop,mine),dOther=scenarioRoadMilesBetweenStops(stop,oc);if(dOther+3<dMine)penalty+=(dMine-dOther)*25000;
+    const dMine=scenarioV32Miles(stop,mine),dOther=scenarioV32Miles(stop,oc);if(dOther+3<dMine)penalty+=(dMine-dOther)*25000;
   }return penalty;
 }
 function scenarioV32Insertion(stop,route,opts,relaxed=false){
@@ -10002,7 +10006,7 @@ function scenarioV32CandidatePool(stop,opts,activeOnly){
 function scenarioV32FeasibleHomes(stop,opts,activeOnly=false){let n=0;for(const r of scenarioV32CandidatePool(stop,opts,activeOnly))if(scenarioV32Insertion(stop,r,opts,false))n++;return n;}
 function scenarioV32Difficulty(stop,opts){
   const homes=scenarioV32FeasibleHomes(stop,opts,false),w=scenarioStopWindow(stop),width=Number.isFinite(w.early)&&Number.isFinite(w.late)?Math.max(1,w.late-w.early):720;
-  const depKey=scenarioV30GroupDepot(stop,opts),dep=depotLocations.find(d=>scenarioNormalizeDepotKey(d.locationKey)===depKey);const dist=dep?scenarioRoadMilesBetweenStops(dep,stop):0,d=scenarioV30StopDemand(stop);
+  const depKey=scenarioV30GroupDepot(stop,opts),dep=depotLocations.find(d=>scenarioNormalizeDepotKey(d.locationKey)===depKey);const dist=dep?scenarioV32Miles(dep,stop):0,d=scenarioV30StopDemand(stop);
   return {homes,width,score:(1000/(homes+1))*1e7+(720/width)*1e6+d.weight*80+d.cube*5000+dist*15000};
 }
 function scenarioV32BestPlacement(stop,opts,relaxed=false,activeOnly=false){let best=null;for(const r of scenarioV32CandidatePool(stop,opts,activeOnly)){const c=scenarioV32Insertion(stop,r,opts,relaxed);if(c&&(!best||c.score<best.score))best=c;}return best;}
@@ -10013,7 +10017,7 @@ function scenarioV32ActivateFor(stop,opts,stats){
 }
 function scenarioV32TryEjection(target,opts,stats,depth=2){
   let direct=scenarioV32BestPlacement(target,opts,true,false);if(direct){scenarioV31CommitPlacement(target,direct);stats.freightRecoveredCases+=scenarioV32Cases(target);return true;}
-  const receiving=scenarioV32CandidatePool(target,opts,false).sort((a,b)=>scenarioRoadMilesBetweenStops(target,scenarioV32Centroid(scenarioV32RouteCustomers(a.id))||target)-scenarioRoadMilesBetweenStops(target,scenarioV32Centroid(scenarioV32RouteCustomers(b.id))||target));
+  const receiving=scenarioV32CandidatePool(target,opts,false).sort((a,b)=>scenarioV32Miles(target,scenarioV32Centroid(scenarioV32RouteCustomers(a.id))||target)-scenarioV32Miles(target,scenarioV32Centroid(scenarioV32RouteCustomers(b.id))||target));
   for(const r of receiving){
     const incumbents=scenarioV32RouteCustomers(r.id).sort((a,b)=>scenarioV32Difficulty(a,opts).score-scenarioV32Difficulty(b,opts).score).slice(0,Math.min(7,scenarioV32RouteCustomers(r.id).length));
     for(const eject of incumbents){const snap=scenarioSnapshotWorkingState();eject.routeId=null;eject.seq=0;const ins=scenarioV32Insertion(target,r,opts,true);
