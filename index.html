@@ -4948,7 +4948,7 @@ function importDepots(data){
       market:(gcLoose(row,['Market'])||'').toString(),
       comment:(gc(row,['Comment'])||'').toString(),
       name:(gcLoose(row,['Name','name'])||'').toString(),
-      shipStreet:(gcLoose(row,['ShipStreet','ShipStreet1','Ship Street','Ship Street 1'])||'').toString(),
+      shipStreet:(gcLoose(row,['ShipStreet','ShipStreet1','Ship Street','Ship Street 1','ShipStreetName','Ship Street Name','Street Name','StreetName','Address','Street Address'])||'').toString(),
       shipStreet2:(gc(row,['ShipStreet2','Ship Street 2'])||'').toString(),
       shipStreet3:(gc(row,['ShipStreet3','Ship Street 3'])||'').toString(),
       shipCrossStreet:(gc(row,['ShipCrossStreet','Ship Cross Street'])||'').toString(),
@@ -11438,7 +11438,11 @@ buildOutputFileRows=function(routeIdSet=null){
 
     row.Customer=depot.locationKey||row.Customer||'';
     row.LocationKey=depot.locationKey||row.LocationKey||'';
-    row.Address=depot.shipStreet||depot.address||row.Address||'';
+    row.Address=
+      depot.shipStreet||
+      depot.address||
+      (depot.raw?gcLoose(depot.raw,['ShipStreet','ShipStreet1','Ship Street','Ship Street 1','ShipStreetName','Ship Street Name','Street Name','StreetName','Address','Street Address']):'')||
+      row.Address||'';
     row.ZipCode=depot.shipZipCode||depot.zip||row.ZipCode||'';
     row.City=depot.shipCity||depot.city||row.City||'';
     row.State=depot.shipState||depot.state||row.State||'';
