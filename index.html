@@ -9966,5 +9966,104 @@ openScenarioAfterActionReport=function(){
 };
 </script>
 
+<script>
+// ============================================================
+// V32 — CUSTOMER-FIRST NETWORK CONSTRUCTION + EJECTION RECOVERY
+// ============================================================
+function scenarioV32RouteCustomers(routeId){return scenarioRouteCustomerStops(routeId).sort((a,b)=>a.seq-b.seq);}
+function scenarioV32Cases(s){return scenarioStopShippedCases(s)||tCases(s)||0;}
+function scenarioV32RouteShape(route,customers){
+  const dep=routeInitialDepot(route)||routeFinalDepot(route), list=(customers||[]).filter(s=>s&&s.lat&&s.lng);
+  if(!dep||!list.length)return {compactness:0,backtracking:0,bearingSpread:0,score:0};
+  const polar=list.map(s=>scenarioV30StopPolar(s,dep)).filter(Boolean), spread=scenarioV30CircularSpread(polar.map(p=>p.bearing));
+  const radii=polar.map(p=>p.roadMiles||0);let back=0;
+  for(let i=1;i<radii.length;i++)if(radii[i]+3<radii[i-1])back+=radii[i-1]-radii[i];
+  let pair=0,n=0;for(let i=0;i<list.length;i++)for(let j=i+1;j<list.length;j++){pair+=scenarioRoadMilesBetweenStops(list[i],list[j]);n++;}
+  const compact=n?pair/n:0,score=compact*1500+back*9000+Math.max(0,spread-80)*12000;
+  return {compactness:compact,backtracking:back,bearingSpread:spread,score};
+}
+function scenarioV32Centroid(customers){const a=(customers||[]).filter(s=>s.lat&&s.lng);return a.length?{lat:a.reduce((x,s)=>x+s.lat,0)/a.length,lng:a.reduce((x,s)=>x+s.lng,0)/a.length}:null;}
+function scenarioV32OverlapPenalty(route,customers,stop){
+  const mine=scenarioV32Centroid([...(customers||[]),stop]);if(!mine)return 0;let penalty=0;
+  for(const other of routes){if(other.id===route.id||!scenarioRouteHasCustomerWork(other.id))continue;const oc=scenarioV32Centroid(scenarioV32RouteCustomers(other.id));if(!oc)continue;
+    const dMine=scenarioRoadMilesBetweenStops(stop,mine),dOther=scenarioRoadMilesBetweenStops(stop,oc);if(dOther+3<dMine)penalty+=(dMine-dOther)*25000;
+  }return penalty;
+}
+function scenarioV32Insertion(stop,route,opts,relaxed=false){
+  const cand=scenarioV31FindBestInsertion(stop,route,opts,relaxed);if(!cand)return null;
+  const before=scenarioV32RouteShape(route,scenarioV32RouteCustomers(route.id)),after=scenarioV32RouteShape(route,cand.customers);
+  cand.compactnessDelta=after.compactness-before.compactness;cand.backtrackingDelta=after.backtracking-before.backtracking;
+  cand.score+=(after.score-before.score)+scenarioV32OverlapPenalty(route,scenarioV32RouteCustomers(route.id),stop);
+  return cand;
+}
+function scenarioV32CandidatePool(stop,opts,activeOnly){
+  let a=scenarioV31CandidateRoutesForStop(stop,opts,null);if(activeOnly)a=a.filter(r=>scenarioRouteHasCustomerWork(r.id));return a;
+}
+function scenarioV32FeasibleHomes(stop,opts,activeOnly=false){let n=0;for(const r of scenarioV32CandidatePool(stop,opts,activeOnly))if(scenarioV32Insertion(stop,r,opts,false))n++;return n;}
+function scenarioV32Difficulty(stop,opts){
+  const homes=scenarioV32FeasibleHomes(stop,opts,false),w=scenarioStopWindow(stop),width=Number.isFinite(w.early)&&Number.isFinite(w.late)?Math.max(1,w.late-w.early):720;
+  const depKey=scenarioV30GroupDepot(stop,opts),dep=depotLocations.find(d=>scenarioNormalizeDepotKey(d.locationKey)===depKey);const dist=dep?scenarioRoadMilesBetweenStops(dep,stop):0,d=scenarioV30StopDemand(stop);
+  return {homes,width,score:(1000/(homes+1))*1e7+(720/width)*1e6+d.weight*80+d.cube*5000+dist*15000};
+}
+function scenarioV32BestPlacement(stop,opts,relaxed=false,activeOnly=false){let best=null;for(const r of scenarioV32CandidatePool(stop,opts,activeOnly)){const c=scenarioV32Insertion(stop,r,opts,relaxed);if(c&&(!best||c.score<best.score))best=c;}return best;}
+function scenarioV32ActivateFor(stop,opts,stats){
+  const dormant=scenarioV32CandidatePool(stop,opts,false).filter(r=>!scenarioRouteHasCustomerWork(r.id));let best=null;
+  for(const r of dormant){const c=scenarioV32Insertion(stop,r,opts,false);if(c&&(!best||c.score<best.score))best=c;}
+  if(best){scenarioV31CommitPlacement(stop,best);stats.routesActivated++;return true;}return false;
+}
+function scenarioV32TryEjection(target,opts,stats,depth=2){
+  let direct=scenarioV32BestPlacement(target,opts,true,false);if(direct){scenarioV31CommitPlacement(target,direct);stats.freightRecoveredCases+=scenarioV32Cases(target);return true;}
+  const receiving=scenarioV32CandidatePool(target,opts,false).sort((a,b)=>scenarioRoadMilesBetweenStops(target,scenarioV32Centroid(scenarioV32RouteCustomers(a.id))||target)-scenarioRoadMilesBetweenStops(target,scenarioV32Centroid(scenarioV32RouteCustomers(b.id))||target));
+  for(const r of receiving){
+    const incumbents=scenarioV32RouteCustomers(r.id).sort((a,b)=>scenarioV32Difficulty(a,opts).score-scenarioV32Difficulty(b,opts).score).slice(0,Math.min(7,scenarioV32RouteCustomers(r.id).length));
+    for(const eject of incumbents){const snap=scenarioSnapshotWorkingState();eject.routeId=null;eject.seq=0;const ins=scenarioV32Insertion(target,r,opts,true);
+      if(ins){scenarioV31CommitPlacement(target,ins);let moved=scenarioV32BestPlacement(eject,opts,true,false);if(moved){scenarioV31CommitPlacement(eject,moved);stats.ejectionMoves+=2;stats.ejectionChains++;stats.freightRecoveredCases+=scenarioV32Cases(target);return true;}
+        if(depth>1&&scenarioV32TryEjection(eject,opts,stats,depth-1)){stats.ejectionMoves++;stats.ejectionChains++;stats.freightRecoveredCases+=scenarioV32Cases(target);return true;}}
+      scenarioRestoreWorkingState(snap);
+    }
+  }return scenarioV32ActivateFor(target,opts,stats);
+}
+function scenarioV32NetworkShape(){let compact=0,back=0,spread=0,n=0;for(const r of routes){if(!scenarioRouteHasCustomerWork(r.id))continue;const s=scenarioV32RouteShape(r,scenarioV32RouteCustomers(r.id));compact+=s.compactness;back+=s.backtracking;spread+=s.bearingSpread;n++;}return {compactness:n?compact/n:0,backtracking:back,bearingSpread:n?spread/n:0};}
+function scenarioV32FinalizeDispatch(opts,stats){
+  stats.dispatchRoutesEvaluated=0;stats.dispatchChanges=0;stats.dispatchWaitSaved=0;if(!opts.optDispatch)return;
+  for(const r of routes){if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))continue;stats.dispatchRoutesEvaluated++;const before=scenarioRouteRuntime(r),old=Number.isFinite(r.scenarioDispatchEpoch)?r.scenarioDispatchEpoch:scenarioOriginalStart(r),best=scenarioV31BestDispatchForOrder(r,scenarioV32RouteCustomers(r.id),opts,true);
+    if(best&&Math.abs(best.start-old)>1){r.scenarioDispatchEpoch=best.start;const d=new Date(best.start*60000);r.earliestStartTime=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');r.latestStartTime=r.earliestStartTime;stats.dispatchChanges++;stats.dispatchWaitSaved+=Math.max(0,(before.waitMinutes||0)-(best.sim.waitMinutes||0));}}
+}
+function scenarioV32BuildFromScratch(opts){
+  scenarioV31ScratchActive=true;const stats={mode:'scratch',algorithm:'V32 customer-first difficult-first dynamic network + ejection-chain recovery',poolStops:0,poolCases:0,difficultFirstPlacements:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0,routesActivated:0,routesRetired:0,dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0};
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);stats.poolStops=pool.length;stats.poolCases=pool.reduce((a,s)=>a+scenarioV32Cases(s),0);
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+  stats.shapeBefore=scenarioV32NetworkShape();const ranked=pool.map(s=>({s,d:scenarioV32Difficulty(s,opts)})).sort((a,b)=>b.d.score-a.d.score);let unassigned=[];
+  for(const x of ranked){let best=scenarioV32BestPlacement(x.s,opts,false,true);if(best){scenarioV31CommitPlacement(x.s,best);stats.difficultFirstPlacements++;continue;}if(scenarioV32ActivateFor(x.s,opts,stats)){stats.difficultFirstPlacements++;continue;}unassigned.push(x.s);}
+  stats.initialUnassigned=unassigned.length;
+  for(let pass=0;pass<3&&unassigned.length;pass++){const next=[];for(const s of unassigned){if(!scenarioV32TryEjection(s,opts,stats,3))next.push(s);}if(next.length===unassigned.length){unassigned=next;break;}unassigned=next;}
+  for(const s of unassigned){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no feasible network placement after V32 ejection-chain recovery';}
+  stats.unassignedStops=unassigned.length;stats.unassignedCases=unassigned.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;stats.shapeAfterConstruction=scenarioV32NetworkShape();return stats;
+}
+scenarioV30BuildFromScratch=scenarioV32BuildFromScratch;scenarioV28BuildFromScratch=scenarioV32BuildFromScratch;
+function scenarioV32QualityVerdict(original,modeled,scratch,removed){
+  const freight=original.shippedCases>0?modeled.shippedCases/original.shippedCases*100:100,milePct=original.miles>0?(modeled.miles-original.miles)/original.miles*100:0,hourPct=original.hours>0?(modeled.hours-original.hours)/original.hours*100:0,onTimeDelta=(modeled.onTimePct||0)-(original.onTimePct||0),waitDelta=(modeled.waitMinutes||0)-(original.waitMinutes||0),violations=(removed?.runtimeViolations?.length||0)+(removed?.capacityViolations?.length||0);
+  const reasons=[];if(violations)reasons.push(violations+' feasibility violation(s)');if(freight<99)reasons.push('severe freight loss ('+scenarioFmt(freight,1)+'% retained)');if(onTimeDelta<0)reasons.push('on-time below baseline');if(waitDelta>1)reasons.push('wait above baseline');if(milePct>10)reasons.push('miles materially above baseline');if(hourPct>10)reasons.push('hours materially above baseline');
+  return {bad:reasons.length>0,freight,milePct,hourPct,onTimeDelta,waitDelta,violations,reason:reasons.length?reasons.join('; '):'Zero feasibility violations; freight and service gates passed'};
+}
+const scenarioRunScenarioModelV32Core=function(){
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+  restoreScenarioBaseline();stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts),original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+  let scratch=null;if(opts.optimizationMode==='scratch')scratch=scenarioV32BuildFromScratch(opts);const network=scenarioV27IncrementalNetworkOptimize(opts);removed.networkAnalysis=network;removed.scratchBuild=scratch;const activeBefore=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length,consolidation=scenarioRunMultiCandidateConsolidation(opts);removed.consolidation=consolidation;network.retirementReviewed=consolidation.routesReviewed||0;network.routesRetired=consolidation.retiredRoutes||0;network.retiredRoutes=(consolidation.retired||[]).map(x=>x.routeName||x.routeId);network.stopsReassigned+=(consolidation.movedStops||0);
+  if(scratch){scratch.routesRetired=Math.max(consolidation.retiredRoutes||0,activeBefore-routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length);scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;}
+  removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);if((removed.runtimeViolations?.length||0)||(removed.capacityViolations?.length||0)){removed.targetedRepair=scenarioTargetedFeasibilityRepair(opts);removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);}else removed.targetedRepair=null;
+  // Dispatch is deliberately last: every final active route is evaluated after
+  // recovery, consolidation, retirement, and any targeted feasibility repair.
+  if(scratch){scenarioV32FinalizeDispatch(opts,scratch);scratch.shapeFinal=scenarioV32NetworkShape();scratch.compactnessImprovement=(scratch.shapeAfterConstruction?.compactness||0)-(scratch.shapeFinal.compactness||0);scratch.backtrackingImprovement=(scratch.shapeAfterConstruction?.backtracking||0)-(scratch.shapeFinal.backtracking||0);removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);}
+  const modeled=scenarioComputeModelMetrics(opts);let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});if(opts.optimizationMode==='scratch'){const q=scenarioV32QualityVerdict(original,modeled,scratch,removed);removed.scratchQualityGate=q;verdict.verdict=q.bad?'SCRATCH SOLUTION REJECTED — NO IMPROVED NETWORK FOUND':'FROM-SCRATCH NETWORK BUILT';}else{scenarioV31ScratchActive=false;if(verdict.verdict==='DEGRADED')verdict.verdict='INCREMENTAL MODEL — REVIEW';else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';else verdict.verdict='IMPROVED — NETWORK OPTIMIZED';}
+  const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:opts.optimizationMode==='scratch'?'Customer-First Network Construction + Ejection Recovery v32':'Incremental Network Optimizer v32',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');openScenarioAfterActionReport();
+};
+runScenarioModel=function(){try{return scenarioRunScenarioModelV32Core();}catch(err){console.error('Run Model failed:',err);showToast('Run Model error: '+((err&&err.message)||err));}};
+const openScenarioAfterActionReportV32Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){openScenarioAfterActionReportV32Base();const r=scenarioLastRun;if(!r||r.options?.optimizationMode!=='scratch')return;const body=document.getElementById('scenario-report-body'),s=r.removed?.scratchBuild,q=r.removed?.scratchQualityGate||{};if(!body||!s)return;for(const h of [...body.querySelectorAll('h3')])if(/^V31 Space-Time/.test(h.textContent||''))h.closest('.scenario-card')?.remove();
+  body.insertAdjacentHTML('beforeend',`<div class="scenario-card" style="margin-top:10px;border-color:rgba(59,130,246,.55);"><h3>V32 Network Construction Analysis</h3><div class="scenario-help">Customer-first, difficult-first network construction uses capacity and runtime as hard constraints, treats the imported resources as an available pool, heavily protects freight, penalizes compactness/backtracking/overlap, recovers freight with multi-route ejection chains, retires consolidatable routes, and finalizes dispatch after the network is complete.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${s.poolStops||0}</div><div class="l">Customer Pool</div></div><div class="scenario-kpi"><div class="v">${s.difficultFirstPlacements||0}</div><div class="l">Difficult-First Placements</div></div><div class="scenario-kpi"><div class="v">${s.initialUnassigned||0} → ${s.unassignedStops||0}</div><div class="l">Initial / Final Unassigned</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(s.freightRecoveredCases||0,0)}</div><div class="l">Cases Recovered by Ejection</div></div></div><div class="scenario-note"><strong>Ejection moves / chains:</strong> ${s.ejectionMoves||0} / ${s.ejectionChains||0} · <strong>Routes activated / retired:</strong> ${s.routesActivated||0} / ${s.routesRetired||0} · <strong>Compactness improvement:</strong> ${scenarioFmt(s.compactnessImprovement||0,1)} mi · <strong>Backtracking improvement:</strong> ${scenarioFmt(s.backtrackingImprovement||0,1)} mi · <strong>Dispatch evaluated / changed:</strong> ${s.dispatchRoutesEvaluated||0} / ${s.dispatchChanges||0} · <strong>Feasibility violations:</strong> ${q.violations||0}.</div><div class="scenario-note" style="margin-top:6px;"><strong>Freight retained:</strong> ${scenarioFmt(q.freight||0,1)}% · <strong>Miles delta:</strong> ${(q.milePct||0)>=0?'+':''}${scenarioFmt(q.milePct||0,1)}% · <strong>On-Time delta:</strong> ${(q.onTimeDelta||0)>=0?'+':''}${scenarioFmt(q.onTimeDelta||0,1)} pts · <strong>Quality Gate:</strong> ${q.bad?'REJECTED':'PASSED'} — ${escapeHtml(q.reason||'')}</div></div>`);
+};
+</script>
+
 </body>
 </html>
