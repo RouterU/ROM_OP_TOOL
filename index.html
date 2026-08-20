@@ -11173,5 +11173,212 @@ openScenarioAfterActionReport=function(){
 };
 </script>
 
+
+<script>
+// ============================================================================
+// v35.1 — SYSTEM TXT EXPORT COMPATIBILITY
+// ============================================================================
+// The external routing-system import is stricter than Excel.  This layer keeps
+// RouteER's workbook/output calculations intact, but normalizes the Publish
+// Routes TXT file to the known-working system format.
+//
+// Key compatibility rules:
+//   • exact working TXT header: "Customer (Child)"
+//   • District / Region_Code carried to depot rows
+//   • ServiceDuration = variable service seconds
+//   • FixedserviceDuration = fixed service seconds
+//   • Country normalized to USA
+//   • LocationWindow times formatted hh:mm AM/PM
+//   • depot Earliest/Latest dates exported as full-day 00:00–23:59
+//   • zero ProjectedBreaks / ProjectedBreakTime exported blank
+//   • cumulative ProjectedDistance / ProjectedTimeDriven are preserved
+// ============================================================================
+
+const ROUTEER_SYSTEM_TXT_HEADERS = [
+  'District','Region_Code','Route','Customer (Child)','Sequence','Order_number',
+  'Parent Account','EarliestDate','LatestDate','projectedArrivalDate',
+  'projectedBegunDate','serviceDurationPerCaseInSeconds','ServiceDuration',
+  'FixedserviceDuration','udfString4','truckKey','driverKey','routename',
+  'routeprojectedDepartedDate','locationType','stoptype','measure1','measure2',
+  'measure3','udfString3','Requirements','LocationKey','Address','ZipCode','City',
+  'State','Country','Latitude','Longitude','ActivityWindowEarliestTime',
+  'ActivityWindowLatestTime','LocationWindowEarliestTime',
+  'LocationWindowLatestTime','Frequency','CustomerName','ProjectedDistance',
+  'ProjectedTimeDriven','ProjectedBreaks','ProjectedBreakTime','UdfString1',
+  'UdfString2'
+];
+
+function systemTxtClean(value){
+  if(value===null||value===undefined)return '';
+  return String(value).replace(/[\t\r\n]+/g,' ').trim();
+}
+function systemTxtDateOnly(value){
+  const s=systemTxtClean(value);
+  const m=s.match(/(\d{4}-\d{2}-\d{2})/);
+  return m?m[1]:'';
+}
+function systemTxtTime12(value){
+  const s=systemTxtClean(value);
+  if(!s)return '';
+
+  // Already has AM/PM.
+  const ap=s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
+  if(ap){
+    let h=parseInt(ap[1],10);
+    return `${String(h).padStart(2,'0')}:${ap[2]} ${ap[3].toUpperCase()}`;
+  }
+
+  // ISO/date-time input: use the time portion.
+  let m=s.match(/(?:T|\s)(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if(!m)m=s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if(!m)return s;
+
+  let h=parseInt(m[1],10);
+  const min=m[2];
+  const suffix=h>=12?'PM':'AM';
+  h=h%12;
+  if(h===0)h=12;
+  return `${String(h).padStart(2,'0')}:${min} ${suffix}`;
+}
+function systemTxtCountry(value){
+  const s=systemTxtClean(value).toUpperCase();
+  if(!s)return 'USA';
+  if(s==='US'||s==='U.S.'||s==='U.S.A.'||s==='UNITED STATES'||s==='UNITED STATES OF AMERICA')return 'USA';
+  return s;
+}
+function systemTxtIsZero(value){
+  const s=systemTxtClean(value);
+  if(!s)return true;
+  const n=parseFloat(s.replace(/,/g,''));
+  return Number.isFinite(n)&&Math.abs(n)<1e-9;
+}
+function systemTxtRouteDefaults(outputRows){
+  const defaults=new Map();
+  (outputRows||[]).forEach(row=>{
+    const key=systemTxtClean(row['Route']);
+    if(!key)return;
+    if(!defaults.has(key))defaults.set(key,{district:'',region:''});
+    const d=defaults.get(key);
+    if(!d.district)d.district=systemTxtClean(row['District']);
+    if(!d.region)d.region=systemTxtClean(row['Region_Code']);
+  });
+
+  // Generic fallback to live route/raw data when a value was not present in
+  // the already-built Output File rows.
+  defaults.forEach((d,key)=>{
+    const route=routes.find(r=>
+      systemTxtClean(exportRouteValue(r))===key ||
+      systemTxtClean(r.routeTemplateKey)===key ||
+      systemTxtClean(r.name)===key
+    );
+    if(route){
+      if(!d.district){
+        d.district=systemTxtClean(
+          route.district ||
+          route.routeData?.district ||
+          route.raw?.District ||
+          route.raw?.DISTRICT ||
+          ''
+        );
+      }
+      if(!d.region){
+        d.region=systemTxtClean(
+          sessionRegionCode ||
+          route.regionCode ||
+          route.region ||
+          route.routeData?.regionCode ||
+          route.raw?.Region_Code ||
+          route.raw?.['Region Code'] ||
+          route.raw?.REGION_CODE ||
+          ''
+        );
+      }
+    }
+  });
+  return defaults;
+}
+function systemTxtNormalizeRow(row,defaults){
+  const r={...row};
+  const routeKey=systemTxtClean(r['Route']);
+  const routeDefaults=defaults.get(routeKey)||{district:'',region:''};
+
+  r['District']=systemTxtClean(r['District'])||routeDefaults.district||'';
+  r['Region_Code']=systemTxtClean(r['Region_Code'])||routeDefaults.region||systemTxtClean(sessionRegionCode)||'';
+
+  // RouteER internally builds these as:
+  //   ServiceDuration = fixed
+  //   FixedserviceDuration = variable + fixed
+  // The working system file expects:
+  //   ServiceDuration = variable
+  //   FixedserviceDuration = fixed
+  if(systemTxtClean(r['locationType']).toUpperCase()==='CUSTOMER'){
+    const currentFixed=parseFloat(r['ServiceDuration']);
+    const currentTotal=parseFloat(r['FixedserviceDuration']);
+    if(Number.isFinite(currentFixed)&&Number.isFinite(currentTotal)){
+      const variable=Math.max(0,currentTotal-currentFixed);
+      r['ServiceDuration']=Number.isInteger(variable)?variable:+variable.toFixed(6);
+      r['FixedserviceDuration']=currentFixed;
+    }
+  }
+
+  r['Country']=systemTxtCountry(r['Country']);
+
+  r['LocationWindowEarliestTime']=systemTxtTime12(r['LocationWindowEarliestTime']);
+  r['LocationWindowLatestTime']=systemTxtTime12(r['LocationWindowLatestTime']);
+
+  // Known-working depot records use the complete route date as their
+  // availability window rather than the modeled arrival/departure timestamps.
+  if(systemTxtClean(r['locationType']).toUpperCase()==='DEPOT'){
+    const routeDate=
+      systemTxtDateOnly(r['projectedArrivalDate']) ||
+      systemTxtDateOnly(r['routeprojectedDepartedDate']) ||
+      systemTxtDateOnly(r['EarliestDate']) ||
+      systemTxtDateOnly(document.getElementById('route-date')?.value);
+    if(routeDate){
+      r['EarliestDate']=`${routeDate} 00:00`;
+      r['LatestDate']=`${routeDate} 23:59`;
+    }
+  }
+
+  if(systemTxtIsZero(r['ProjectedBreaks']))r['ProjectedBreaks']='';
+  if(systemTxtIsZero(r['ProjectedBreakTime']))r['ProjectedBreakTime']='';
+
+  return r;
+}
+function buildOutputTextContent(outputHeaders,outputRows){
+  const defaults=systemTxtRouteDefaults(outputRows);
+  const normalized=(outputRows||[]).map(row=>systemTxtNormalizeRow(row,defaults));
+  const lines=[ROUTEER_SYSTEM_TXT_HEADERS.join('\t')];
+
+  normalized.forEach(row=>{
+    const cells=ROUTEER_SYSTEM_TXT_HEADERS.map(header=>{
+      // TXT display header differs from the internal/Excel key only here.
+      const sourceKey=header==='Customer (Child)'?'Customer':header;
+      return systemTxtClean(row[sourceKey]);
+    });
+    lines.push(cells.join('\t'));
+  });
+
+  return lines.join('\r\n');
+}
+
+// Keep the established download behavior/name while forcing the compatible TXT
+// serializer above.
+function downloadOutputTextFile(outputHeaders,outputRows){
+  const txt=buildOutputTextContent(outputHeaders,outputRows);
+  const fileName=`${outputTextFilePrefix(outputRows)}_${timestampForTextExport()}.txt`;
+  const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download=fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  return fileName;
+}
+</script>
+
 </body>
 </html>
