@@ -10277,5 +10277,404 @@ openScenarioAfterActionReport=function(){
 };
 </script>
 
+
+<script>
+// ============================================================
+// V32.2 — FREIGHT-FIRST BOUNDED SCRATCH CONSTRUCTION
+//
+// V32.1 correctly stopped the runaway recursive search, but its 12-second
+// deadline also interrupted the PRIMARY construction loop. Any customer not
+// reached before the deadline was automatically left Unassigned. V32.2 never
+// time-caps the first construction pass: every customer is evaluated once.
+// Only the expensive ejection/recovery stage is time-bounded.
+//
+// Additional changes:
+//  • evaluate active + dormant resources together instead of filling one route
+//    until it breaks before opening the next resource;
+//  • limit insertion positions to geographically useful positions;
+//  • reserve capacity/runtime headroom during early construction;
+//  • use an exhaustive fallback scan only when the fast shortlist finds no home;
+//  • bound only recovery/ejection search;
+//  • clean obsolete V30/V31 scratch cards from the report.
+// ============================================================
+let scenarioV322RecoveryDeadline=0;
+let scenarioV322InsertionEvaluations=0;
+let scenarioV322FallbackScans=0;
+
+function scenarioV322RecoveryTimeLeft(){
+  return !scenarioV322RecoveryDeadline || performance.now() < scenarioV322RecoveryDeadline;
+}
+
+function scenarioV322CandidatePositions(stop,base,opts){
+  if(!opts.removeSequenceLock){
+    return scenarioV28ScratchCandidatePositions(stop,base,opts);
+  }
+  const n=base.length;
+  if(n<=4 || !Number.isFinite(+stop?.lat) || !Number.isFinite(+stop?.lng)){
+    return Array.from({length:n+1},(_,i)=>i);
+  }
+
+  // Only test positions around the geographically closest existing customers,
+  // plus the two ends. This reduces an insertion from O(route length) full
+  // timeline simulations to usually 4–6 simulations.
+  const ranked=base
+    .map((s,i)=>({i,d:scenarioV32Miles(stop,s)}))
+    .filter(x=>Number.isFinite(x.d))
+    .sort((a,b)=>a.d-b.d)
+    .slice(0,2);
+
+  const set=new Set([0,n]);
+  ranked.forEach(x=>{
+    set.add(Math.max(0,Math.min(n,x.i)));
+    set.add(Math.max(0,Math.min(n,x.i+1)));
+  });
+  return [...set].sort((a,b)=>a-b);
+}
+
+function scenarioV322HeadroomPenalty(route,customers,sim,opts){
+  const c=scenarioCapacityStatus(route,customers);
+  let util=0;
+  if(c.known){
+    const wu=c.cap.weight>0?(c.load.weight/c.cap.weight):0;
+    const cu=c.cap.cube>0?(c.load.cube/c.cap.cube):0;
+    util=Math.max(wu,cu);
+  }
+  const lim=scenarioV28RuntimeLimits(route,opts);
+  const timeUtil=lim.max>0?(sim.hours/lim.max):0;
+
+  // Leave headroom while the network is still being constructed. The penalty
+  // rises nonlinearly after 75% utilization but does not prohibit a legal load.
+  let p=0;
+  if(util>.75)p+=Math.pow(util-.75,2)*900000;
+  if(timeUtil>.75)p+=Math.pow(timeUtil-.75,2)*700000;
+  return p;
+}
+
+function scenarioV322Insertion(stop,route,opts,relaxed=false){
+  scenarioV322InsertionEvaluations++;
+  if(!scenarioCanTargetRoute(stop,route,opts))return null;
+
+  const base=scenarioV32RouteCustomers(route.id).filter(s=>s.id!==stop.id);
+  const cap0=scenarioCapacityStatus(route,[...base,stop]);
+  if(!cap0.known && route.id!==scenarioOriginalRouteId(stop))return null;
+  if(cap0.known && !cap0.ok)return null;
+
+  let best=null;
+  for(const i of scenarioV322CandidatePositions(stop,base,opts)){
+    const candidate=[...base];
+    candidate.splice(i,0,stop);
+    const ordered=scenarioOrderCustomersForSpecialRules(candidate);
+    const disp=scenarioV31BestDispatchForOrder(route,ordered,opts,relaxed);
+    if(!disp)continue;
+
+    const beforeShape=scenarioV32RouteShape(route,base);
+    const afterShape=scenarioV32RouteShape(route,ordered);
+    const shapeDelta=(afterShape.score-beforeShape.score);
+    const overlap=scenarioV32OverlapPenalty(route,base,stop);
+    const headroom=scenarioV322HeadroomPenalty(route,ordered,disp.sim,opts);
+
+    // Opening another resource is a cost, but only a modest one. V32.1's
+    // active-only construction packed early routes too aggressively.
+    const activationPenalty=base.length?0:55000;
+
+    const score=disp.score+shapeDelta+overlap+headroom+activationPenalty;
+    if(!best||score<best.score){
+      best={
+        route,
+        customers:ordered,
+        order:disp.order,
+        sim:disp.sim,
+        start:disp.start,
+        score,
+        wait:disp.wait,
+        compactnessDelta:afterShape.compactness-beforeShape.compactness,
+        backtrackingDelta:afterShape.backtracking-beforeShape.backtracking
+      };
+    }
+  }
+  return best;
+}
+
+// Override the V32 insertion symbol so all downstream V32 recovery logic uses
+// the fast, headroom-aware insertion evaluation.
+scenarioV32Insertion=scenarioV322Insertion;
+
+function scenarioV322RouteCheapScore(route,stop){
+  const customers=scenarioV32RouteCustomers(route.id);
+  const center=scenarioV32Centroid(customers);
+  const ref=center || routeInitialDepot(route) || routeFinalDepot(route) || stop;
+  let geo=scenarioV32Miles(stop,ref);
+  if(!Number.isFinite(geo))geo=1e6;
+
+  // Prefer resources whose availability overlaps the customer window.
+  const w=scenarioStopWindow(stop);
+  const rw=scenarioV31ResourceWindow(route);
+  let windowPenalty=0;
+  if(Number.isFinite(w.early)&&Number.isFinite(w.late)&&Number.isFinite(rw.start)&&Number.isFinite(rw.end)){
+    if(w.late<rw.start)windowPenalty+=(rw.start-w.late)*4;
+    if(w.early>rw.end)windowPenalty+=(w.early-rw.end)*4;
+  }
+
+  const sim=customers.length?scenarioRouteRuntime(route):null;
+  const lim=scenarioV28RuntimeLimits(route,{runtimeUseResourceMax:true,runtimeUseResourceMin:true});
+  const loadPenalty=sim&&lim.max>0?(sim.hours/lim.max)*15:0;
+  return geo+windowPenalty+loadPenalty;
+}
+
+function scenarioV322RouteShortlist(stop,opts,limit=7){
+  const all=scenarioV31CandidateRoutesForStop(stop,opts,null)||[];
+  const active=all.filter(r=>scenarioRouteHasCustomerWork(r.id))
+    .sort((a,b)=>scenarioV322RouteCheapScore(a,stop)-scenarioV322RouteCheapScore(b,stop))
+    .slice(0,4);
+  const dormant=all.filter(r=>!scenarioRouteHasCustomerWork(r.id))
+    .sort((a,b)=>scenarioV322RouteCheapScore(a,stop)-scenarioV322RouteCheapScore(b,stop))
+    .slice(0,3);
+
+  const seen=new Set(),result=[];
+  [...active,...dormant].forEach(r=>{
+    if(!seen.has(r.id)){seen.add(r.id);result.push(r);}
+  });
+  return result.slice(0,limit);
+}
+
+function scenarioV322FindPlacement(stop,opts,relaxed=false,exhaustiveFallback=true){
+  let best=null;
+  const shortlist=scenarioV322RouteShortlist(stop,opts,7);
+  for(const r of shortlist){
+    const c=scenarioV322Insertion(stop,r,opts,relaxed);
+    if(c&&(!best||c.score<best.score))best=c;
+  }
+  if(best || !exhaustiveFallback)return best;
+
+  // Freight protection fallback: if the cheap shortlist found no legal home,
+  // scan every eligible resource once before declaring the customer unassigned.
+  scenarioV322FallbackScans++;
+  const all=scenarioV31CandidateRoutesForStop(stop,opts,null)||[];
+  const already=new Set(shortlist.map(r=>r.id));
+  for(const r of all){
+    if(already.has(r.id))continue;
+    const c=scenarioV322Insertion(stop,r,opts,relaxed);
+    if(c&&(!best||c.score<best.score))best=c;
+  }
+  return best;
+}
+
+function scenarioV32BestPlacement(stop,opts,relaxed=false,activeOnly=false){
+  // "activeOnly" is intentionally ignored in V32.2. A true scratch build must
+  // consider unused resources before an existing route is packed to the edge.
+  if(scenarioV322RecoveryDeadline && !scenarioV322RecoveryTimeLeft())return null;
+  return scenarioV322FindPlacement(stop,opts,relaxed,true);
+}
+
+function scenarioV32ActivateFor(stop,opts,stats){
+  // No separate activation phase is required: V32.2 evaluates dormant routes
+  // alongside active routes. Kept for compatibility with older recovery code.
+  const best=scenarioV322FindPlacement(stop,opts,false,true);
+  if(!best)return false;
+  const wasDormant=!scenarioRouteHasCustomerWork(best.route.id);
+  scenarioV31CommitPlacement(stop,best);
+  if(wasDormant)stats.routesActivated=(stats.routesActivated||0)+1;
+  return true;
+}
+
+function scenarioV322TryEjection(target,opts,stats,depth=2){
+  if(!scenarioV322RecoveryTimeLeft())return false;
+
+  const direct=scenarioV322FindPlacement(target,opts,true,true);
+  if(direct){
+    const wasDormant=!scenarioRouteHasCustomerWork(direct.route.id);
+    scenarioV31CommitPlacement(target,direct);
+    if(wasDormant)stats.routesActivated=(stats.routesActivated||0)+1;
+    stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(target);
+    return true;
+  }
+
+  // Bounded ejection: 4 nearest receiving routes × 2 flexible eject candidates,
+  // depth 2. This keeps the search useful without recreating V32's exponential
+  // browser lock-up.
+  const receiving=scenarioV322RouteShortlist(target,opts,4);
+  for(const r of receiving){
+    if(!scenarioV322RecoveryTimeLeft())return false;
+
+    const incumbents=scenarioV32RouteCustomers(r.id)
+      .slice()
+      .sort((a,b)=>scenarioV321QuickDifficulty(a)-scenarioV321QuickDifficulty(b))
+      .slice(0,2);
+
+    for(const eject of incumbents){
+      if(!scenarioV322RecoveryTimeLeft())return false;
+      const snap=scenarioSnapshotWorkingState();
+
+      eject.routeId=null;eject.seq=0;
+      const ins=scenarioV322Insertion(target,r,opts,true);
+      if(ins){
+        scenarioV31CommitPlacement(target,ins);
+        const moved=scenarioV322FindPlacement(eject,opts,true,true);
+        if(moved){
+          scenarioV31CommitPlacement(eject,moved);
+          stats.ejectionMoves=(stats.ejectionMoves||0)+2;
+          stats.ejectionChains=(stats.ejectionChains||0)+1;
+          stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(target);
+          return true;
+        }
+
+        if(depth>1 && scenarioV322TryEjection(eject,opts,stats,depth-1)){
+          stats.ejectionMoves=(stats.ejectionMoves||0)+1;
+          stats.ejectionChains=(stats.ejectionChains||0)+1;
+          stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(target);
+          return true;
+        }
+      }
+      scenarioRestoreWorkingState(snap);
+    }
+  }
+  return false;
+}
+scenarioV32TryEjection=scenarioV322TryEjection;
+
+function scenarioV322BuildFromScratch(opts){
+  scenarioV31ScratchActive=true;
+  scenarioV322RecoveryDeadline=0;
+  scenarioV322InsertionEvaluations=0;
+  scenarioV322FallbackScans=0;
+
+  const startMs=performance.now();
+  const stats={
+    mode:'scratch',
+    algorithm:'V32.2 freight-first bounded scratch',
+    poolStops:0,poolCases:0,
+    difficultFirstPlacements:0,initialPlacedStops:0,
+    initialUnassigned:0,initialUnplacedStops:0,
+    unassignedStops:0,unassignedCases:0,
+    freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0,
+    routesActivated:0,routesRetired:0,
+    dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0,
+    primaryBuildSeconds:0,recoverySeconds:0,
+    insertionEvaluations:0,fallbackScans:0,
+    recoveryBudgetSeconds:18,recoveryBudgetExceeded:false
+  };
+
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  stats.poolStops=pool.length;
+  stats.poolCases=pool.reduce((a,s)=>a+scenarioV32Cases(s),0);
+
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{
+    delete r.scenarioDispatchEpoch;
+    r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;
+  });
+
+  stats.shapeBefore=scenarioV32NetworkShape();
+
+  // Difficult/remote/tight-window freight first, but ranking is cheap.
+  const ranked=pool
+    .map(s=>({s,score:scenarioV321QuickDifficulty(s)}))
+    .sort((a,b)=>b.score-a.score);
+
+  let unassigned=[];
+  for(const x of ranked){
+    const beforeUsed=scenarioRouteHasCustomerWork.bind(null);
+    const best=scenarioV322FindPlacement(x.s,opts,false,true);
+    if(best){
+      const wasDormant=!scenarioRouteHasCustomerWork(best.route.id);
+      scenarioV31CommitPlacement(x.s,best);
+      if(wasDormant)stats.routesActivated++;
+      stats.difficultFirstPlacements++;
+    }else{
+      unassigned.push(x.s);
+    }
+  }
+
+  stats.primaryBuildSeconds=(performance.now()-startMs)/1000;
+  stats.initialUnassigned=unassigned.length;
+  stats.initialUnplacedStops=unassigned.length;
+  stats.initialPlacedStops=stats.difficultFirstPlacements;
+
+  // Time-bound ONLY the expensive recovery stage. Every customer has already
+  // received a full primary-placement attempt before this clock starts.
+  const recStart=performance.now();
+  scenarioV322RecoveryDeadline=recStart+(stats.recoveryBudgetSeconds*1000);
+
+  for(let pass=0;pass<2 && unassigned.length && scenarioV322RecoveryTimeLeft();pass++){
+    const next=[];
+    let recoveredThisPass=0;
+    for(const s of unassigned){
+      if(!scenarioV322RecoveryTimeLeft()){next.push(s);continue;}
+      if(scenarioV322TryEjection(s,opts,stats,2))recoveredThisPass++;
+      else next.push(s);
+    }
+    unassigned=next;
+    if(!recoveredThisPass)break;
+  }
+
+  stats.recoveryBudgetExceeded=!scenarioV322RecoveryTimeLeft()&&unassigned.length>0;
+  stats.recoverySeconds=(performance.now()-recStart)/1000;
+  scenarioV322RecoveryDeadline=0;
+
+  for(const s of unassigned){
+    s.routeId=null;s.seq=0;
+    s.scenarioRemovedReason='Build From Scratch: no feasible placement after V32.2 primary build and bounded recovery';
+  }
+
+  stats.unassignedStops=unassigned.length;
+  stats.unassignedCases=unassigned.reduce((a,s)=>a+scenarioV32Cases(s),0);
+  stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  stats.shapeAfterConstruction=scenarioV32NetworkShape();
+  stats.insertionEvaluations=scenarioV322InsertionEvaluations;
+  stats.fallbackScans=scenarioV322FallbackScans;
+
+  // Compatibility with prior scratch-report wrappers.
+  stats.timeAwarePlaced=stats.difficultFirstPlacements;
+  stats.budgetExceeded=stats.recoveryBudgetExceeded;
+  stats.performanceBudgetSeconds=stats.recoveryBudgetSeconds;
+
+  return stats;
+}
+scenarioV32BuildFromScratch=scenarioV322BuildFromScratch;
+scenarioV30BuildFromScratch=scenarioV322BuildFromScratch;
+scenarioV28BuildFromScratch=scenarioV322BuildFromScratch;
+
+// Report cleanup + V32.2 diagnostics.
+const openScenarioAfterActionReportV322Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV322Base();
+  const r=scenarioLastRun,s=r?.removed?.scratchBuild;
+  if(!r||r.options?.optimizationMode!=='scratch'||!s)return;
+  const body=document.getElementById('scenario-report-body');
+  if(!body)return;
+
+  // Remove legacy scratch cards whose values are no longer meaningful in V32.
+  for(const h of [...body.querySelectorAll('h3')]){
+    const txt=(h.textContent||'').trim();
+    if(txt==='Scratch Construction Analysis' || /^V30 Geographic Scratch Analysis/.test(txt) || /^V31 Space-Time Scratch Analysis/.test(txt) || /^V32\.1 Performance Guardrail/.test(txt)){
+      h.closest('.scenario-card')?.remove();
+    }
+  }
+
+  const retained=s.poolCases>0?Math.max(0,(s.poolCases-(s.unassignedCases||0))/s.poolCases*100):100;
+  body.insertAdjacentHTML('beforeend',
+    `<div class="scenario-card" style="margin-top:10px;border-color:rgba(62,207,142,.5);">
+      <h3>V32.2 Construction Performance</h3>
+      <div class="scenario-help">
+        Every customer receives a primary placement attempt before any performance budget is applied. Active and dormant resources are evaluated together, route insertion positions are geographically bounded, and only the ejection-chain recovery stage has an 18-second search budget.
+      </div>
+      <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));">
+        <div class="scenario-kpi"><div class="v">${s.initialPlacedStops||0}/${s.poolStops||0}</div><div class="l">Primary Placements</div></div>
+        <div class="scenario-kpi"><div class="v">${s.initialUnassigned||0} → ${s.unassignedStops||0}</div><div class="l">Unassigned Before / After Recovery</div></div>
+        <div class="scenario-kpi"><div class="v">${scenarioFmt(retained,1)}%</div><div class="l">Scratch Freight Retention</div></div>
+        <div class="scenario-kpi"><div class="v">${s.routesActivated||0}</div><div class="l">Routes Activated</div></div>
+      </div>
+      <div class="scenario-note">
+        <strong>Primary build:</strong> ${scenarioFmt(s.primaryBuildSeconds||0,1)} sec ·
+        <strong>Recovery:</strong> ${scenarioFmt(s.recoverySeconds||0,1)} sec ·
+        <strong>Insertion evaluations:</strong> ${(s.insertionEvaluations||0).toLocaleString()} ·
+        <strong>Exhaustive fallback scans:</strong> ${(s.fallbackScans||0).toLocaleString()} ·
+        <strong>Ejection chains:</strong> ${s.ejectionChains||0} ·
+        <strong>Recovery budget exhausted:</strong> ${s.recoveryBudgetExceeded?'Yes':'No'}.
+      </div>
+    </div>`);
+};
+</script>
+
 </body>
 </html>
