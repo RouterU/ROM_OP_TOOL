@@ -10823,5 +10823,355 @@ openScenarioAfterActionReport=function(){
 
 </script>
 
+
+<script>
+// ============================================================================
+// V34 — FREIGHT-INTEGRITY RECOVERY + MILEAGE POLISH
+// ============================================================================
+function scenarioV34LiveStop(stopOrId){
+  const id=typeof stopOrId==='string'?stopOrId:stopOrId?.id;
+  return id?stops.find(s=>s.id===id)||null:null;
+}
+function scenarioV34LiveRoute(routeOrId){
+  const id=typeof routeOrId==='string'?routeOrId:routeOrId?.id;
+  return id?routes.find(r=>r.id===id)||null:null;
+}
+function scenarioV34WaitMinutes(sim){
+  if(Number.isFinite(+sim?.waitMinutes))return Math.max(0,+sim.waitMinutes);
+  return (sim?.stops||[]).reduce((a,d)=>a+Math.max(0,+d.wait||0),0);
+}
+function scenarioV34LateCount(sim){return Math.max(0,+sim?.late||0);}
+function scenarioV34CommitVerified(stopId,best){
+  const live=scenarioV34LiveStop(stopId);
+  const route=scenarioV34LiveRoute(best?.route);
+  if(!live||!route||!best)return false;
+  best.route=route;
+  scenarioV31CommitPlacement(live,best);
+  return !!scenarioV34LiveStop(stopId)?.routeId;
+}
+
+function scenarioV34TryEjection(targetOrId,opts,stats,depth=2){
+  if(!scenarioV322RecoveryTimeLeft())return false;
+  const targetId=typeof targetOrId==='string'?targetOrId:targetOrId?.id;
+  let liveTarget=scenarioV34LiveStop(targetId);
+  if(!liveTarget)return false;
+  if(liveTarget.routeId)return true;
+
+  let direct=scenarioV322FindPlacement(liveTarget,opts,true,true);
+  if(direct && scenarioV34CommitVerified(targetId,direct)){
+    stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(scenarioV34LiveStop(targetId));
+    return true;
+  }
+
+  const receiverIds=scenarioV322RouteShortlist(liveTarget,opts,5).map(r=>r.id);
+  for(const routeId of receiverIds){
+    if(!scenarioV322RecoveryTimeLeft())return false;
+    let route=scenarioV34LiveRoute(routeId);
+    liveTarget=scenarioV34LiveStop(targetId);
+    if(!route||!liveTarget||liveTarget.routeId)continue;
+
+    const ejectIds=scenarioV32RouteCustomers(routeId)
+      .slice()
+      .sort((a,b)=>scenarioV33FreightPriority(a,opts)-scenarioV33FreightPriority(b,opts))
+      .slice(0,3)
+      .map(s=>s.id);
+
+    for(const ejectId of ejectIds){
+      if(!scenarioV322RecoveryTimeLeft())return false;
+      const snap=scenarioSnapshotWorkingState();
+
+      route=scenarioV34LiveRoute(routeId);
+      liveTarget=scenarioV34LiveStop(targetId);
+      let eject=scenarioV34LiveStop(ejectId);
+      if(!route||!liveTarget||!eject){scenarioRestoreWorkingState(snap);continue;}
+
+      eject.routeId=null;eject.seq=0;
+      const ins=scenarioV33Insertion(liveTarget,route,opts,true);
+      if(ins && scenarioV34CommitVerified(targetId,ins)){
+        eject=scenarioV34LiveStop(ejectId);
+        const moved=eject?scenarioV322FindPlacement(eject,opts,true,true):null;
+        if(moved && scenarioV34CommitVerified(ejectId,moved)){
+          if(scenarioV34LiveStop(targetId)?.routeId && scenarioV34LiveStop(ejectId)?.routeId){
+            stats.ejectionMoves=(stats.ejectionMoves||0)+2;
+            stats.ejectionChains=(stats.ejectionChains||0)+1;
+            stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(scenarioV34LiveStop(targetId));
+            return true;
+          }
+        }
+
+        if(depth>1){
+          const liveEject=scenarioV34LiveStop(ejectId);
+          if(liveEject && !liveEject.routeId && scenarioV34TryEjection(ejectId,opts,stats,depth-1)){
+            if(scenarioV34LiveStop(targetId)?.routeId && scenarioV34LiveStop(ejectId)?.routeId){
+              stats.ejectionMoves=(stats.ejectionMoves||0)+1;
+              stats.ejectionChains=(stats.ejectionChains||0)+1;
+              stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(scenarioV34LiveStop(targetId));
+              return true;
+            }
+          }
+        }
+      }
+      scenarioRestoreWorkingState(snap);
+    }
+  }
+  return false;
+}
+scenarioV322TryEjection=scenarioV34TryEjection;
+scenarioV32TryEjection=scenarioV34TryEjection;
+
+function scenarioV34RouteMileagePolish(route,opts,deadline){
+  let moves=0,milesSaved=0;
+  if(!route||!scenarioRouteHasCustomerWork(route.id)||scenarioRouteIsProtectedLongHaul(route))return {moves,milesSaved};
+  for(let pass=0;pass<3 && performance.now()<deadline;pass++){
+    route=scenarioV34LiveRoute(route.id);
+    if(!route)break;
+    const base=scenarioV32RouteCustomers(route.id);
+    if(base.length<4)break;
+    const current=scenarioV31BestDispatchForOrder(route,base,opts,true);
+    if(!current)break;
+    let best=null;
+    for(let i=0;i<base.length-2 && performance.now()<deadline;i++){
+      for(let j=i+1;j<base.length && j<=i+7 && performance.now()<deadline;j++){
+        const cand=[...base.slice(0,i),...base.slice(i,j+1).reverse(),...base.slice(j+1)];
+        const ordered=scenarioOrderCustomersForSpecialRules(cand);
+        const ev=scenarioV31BestDispatchForOrder(route,ordered,opts,true);
+        if(!ev)continue;
+        const save=(current.sim.miles||0)-(ev.sim.miles||0);
+        if(save<0.75)continue;
+        if(scenarioV34LateCount(ev.sim)>scenarioV34LateCount(current.sim))continue;
+        if(scenarioV34WaitMinutes(ev.sim)>scenarioV34WaitMinutes(current.sim)+2)continue;
+        if(!best||save>best.save)best={ordered,ev,save};
+      }
+    }
+    if(!best)break;
+    scenarioApplyRouteOrder(route.id,scenarioComposePreservingDepots(route.id,best.ordered));
+    if(Number.isFinite(best.ev.start)){
+      route=scenarioV34LiveRoute(route.id);
+      route.scenarioDispatchEpoch=best.ev.start;
+    }
+    moves++;milesSaved+=best.save;
+  }
+  return {moves,milesSaved};
+}
+
+function scenarioV34CrossRouteMileagePolish(opts,deadline){
+  let moves=0,milesSaved=0,evaluated=0;
+  const routeIds=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)).map(r=>r.id);
+
+  for(let pass=0;pass<2 && performance.now()<deadline;pass++){
+    let bestGlobal=null;
+    for(const sourceId of routeIds){
+      if(performance.now()>=deadline)break;
+      const source=scenarioV34LiveRoute(sourceId);
+      if(!source||!scenarioRouteHasCustomerWork(sourceId))continue;
+      const srcCustomers=scenarioV32RouteCustomers(sourceId);
+      if(srcCustomers.length<=2)continue;
+      const dep=routeInitialDepot(source)||routeFinalDepot(source);
+
+      const candidates=srcCustomers.slice().sort((a,b)=>{
+        const da=dep?scenarioV32Miles(dep,a):0,db=dep?scenarioV32Miles(dep,b):0;
+        return (db||0)-(da||0);
+      }).slice(0,Math.min(6,srcCustomers.length));
+
+      for(const stopRef of candidates){
+        if(performance.now()>=deadline)break;
+        const stopId=stopRef.id;
+        const stop=scenarioV34LiveStop(stopId);if(!stop)continue;
+        const otherRoutes=routes.filter(r=>r.id!==sourceId&&scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&scenarioCanTargetRoute(stop,r,opts))
+          .sort((a,b)=>scenarioV321RouteDistanceToStop(a,stop)-scenarioV321RouteDistanceToStop(b,stop))
+          .slice(0,4);
+
+        for(const destRef of otherRoutes){
+          if(performance.now()>=deadline)break;
+          evaluated++;
+          const snap=scenarioSnapshotWorkingState();
+          let liveStop=scenarioV34LiveStop(stopId);
+          let liveSource=scenarioV34LiveRoute(sourceId);
+          let liveDest=scenarioV34LiveRoute(destRef.id);
+          if(!liveStop||!liveSource||!liveDest){scenarioRestoreWorkingState(snap);continue;}
+
+          const beforeSrc=scenarioV31BestDispatchForOrder(liveSource,scenarioV32RouteCustomers(sourceId),opts,true);
+          const beforeDst=scenarioV31BestDispatchForOrder(liveDest,scenarioV32RouteCustomers(liveDest.id),opts,true);
+          liveStop.routeId=null;liveStop.seq=0;
+          const remain=scenarioV32RouteCustomers(sourceId).filter(s=>s.id!==stopId);
+          const afterSrc=scenarioV31BestDispatchForOrder(liveSource,remain,opts,true);
+          const destIns=scenarioV33Insertion(liveStop,liveDest,opts,true);
+
+          if(beforeSrc&&beforeDst&&afterSrc&&destIns){
+            const beforeMiles=(beforeSrc.sim.miles||0)+(beforeDst.sim.miles||0);
+            const afterMiles=(afterSrc.sim.miles||0)+(destIns.sim.miles||0);
+            const save=beforeMiles-afterMiles;
+            const beforeLate=scenarioV34LateCount(beforeSrc.sim)+scenarioV34LateCount(beforeDst.sim);
+            const afterLate=scenarioV34LateCount(afterSrc.sim)+scenarioV34LateCount(destIns.sim);
+            const beforeWait=scenarioV34WaitMinutes(beforeSrc.sim)+scenarioV34WaitMinutes(beforeDst.sim);
+            const afterWait=scenarioV34WaitMinutes(afterSrc.sim)+scenarioV34WaitMinutes(destIns.sim);
+            if(save>=1.5&&afterLate<=beforeLate&&afterWait<=beforeWait+3){
+              if(!bestGlobal||save>bestGlobal.save)bestGlobal={stopId,sourceId,destId:liveDest.id,save};
+            }
+          }
+          scenarioRestoreWorkingState(snap);
+        }
+      }
+    }
+    if(!bestGlobal)break;
+
+    const stop=scenarioV34LiveStop(bestGlobal.stopId);
+    const source=scenarioV34LiveRoute(bestGlobal.sourceId);
+    const dest=scenarioV34LiveRoute(bestGlobal.destId);
+    if(!stop||!source||!dest)break;
+    const sourceOrder=scenarioV32RouteCustomers(source.id).filter(s=>s.id!==stop.id);
+    stop.routeId=null;stop.seq=0;
+    const srcEv=scenarioV31BestDispatchForOrder(source,sourceOrder,opts,true);
+    const ins=scenarioV33Insertion(stop,dest,opts,true);
+    if(!srcEv||!ins)break;
+
+    scenarioApplyRouteOrder(source.id,scenarioComposePreservingDepots(source.id,sourceOrder));
+    if(!scenarioV34CommitVerified(stop.id,ins))break;
+    if(Number.isFinite(srcEv.start))scenarioV34LiveRoute(source.id).scenarioDispatchEpoch=srcEv.start;
+    moves++;milesSaved+=bestGlobal.save;
+  }
+  return {moves,milesSaved,evaluated};
+}
+
+function scenarioV34MileagePolish(opts){
+  const start=performance.now(),deadline=start+9000;
+  let routeMoves=0,routeMiles=0;
+  for(const r0 of [...routes]){
+    if(performance.now()>=deadline)break;
+    const x=scenarioV34RouteMileagePolish(scenarioV34LiveRoute(r0.id),opts,deadline);
+    routeMoves+=x.moves;routeMiles+=x.milesSaved;
+  }
+  const cross=scenarioV34CrossRouteMileagePolish(opts,deadline);
+  return {
+    routeSequenceMoves:routeMoves,
+    routeSequenceMilesSaved:routeMiles,
+    crossRouteMoves:cross.moves,
+    crossRouteMilesSaved:cross.milesSaved,
+    crossRouteEvaluated:cross.evaluated,
+    totalMilesSaved:routeMiles+cross.milesSaved,
+    seconds:(performance.now()-start)/1000
+  };
+}
+
+function scenarioV34BuildFromScratch(opts){
+  scenarioV31ScratchActive=true;
+  scenarioV322RecoveryDeadline=0;
+  scenarioV322InsertionEvaluations=0;
+  scenarioV322FallbackScans=0;
+
+  const startMs=performance.now();
+  const stats={
+    mode:'scratch',algorithm:'V34 freight-integrity + territory + mileage polish',
+    poolStops:0,poolCases:0,difficultFirstPlacements:0,initialPlacedStops:0,
+    initialUnassigned:0,initialUnplacedStops:0,unassignedStops:0,unassignedCases:0,
+    freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0,routesActivated:0,routesRetired:0,
+    dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0,
+    primaryBuildSeconds:0,recoverySeconds:0,insertionEvaluations:0,fallbackScans:0,
+    recoveryBudgetSeconds:24,recoveryBudgetExceeded:false,
+    recoveryVerifiedStops:0,recoveryPhantomPrevented:0
+  };
+
+  const pool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+  const poolIds=pool.map(s=>s.id);
+  stats.poolStops=poolIds.length;
+  stats.poolCases=pool.reduce((a,s)=>a+scenarioV32Cases(s),0);
+
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{
+    delete r.scenarioDispatchEpoch;
+    r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;
+  });
+
+  const ranked=poolIds.map(id=>({id,score:scenarioV33FreightPriority(scenarioV34LiveStop(id),opts)})).sort((a,b)=>b.score-a.score);
+  for(const x of ranked){
+    const live=scenarioV34LiveStop(x.id);if(!live)continue;
+    const best=scenarioV322FindPlacement(live,opts,false,true);
+    if(best&&scenarioV34CommitVerified(x.id,best))stats.difficultFirstPlacements++;
+  }
+
+  stats.primaryBuildSeconds=(performance.now()-startMs)/1000;
+  stats.initialPlacedStops=poolIds.filter(id=>!!scenarioV34LiveStop(id)?.routeId).length;
+  stats.initialUnassigned=poolIds.length-stats.initialPlacedStops;
+  stats.initialUnplacedStops=stats.initialUnassigned;
+
+  let missingIds=poolIds.filter(id=>!scenarioV34LiveStop(id)?.routeId)
+    .sort((a,b)=>scenarioV33FreightPriority(scenarioV34LiveStop(b),opts)-scenarioV33FreightPriority(scenarioV34LiveStop(a),opts));
+
+  const recStart=performance.now();
+  scenarioV322RecoveryDeadline=recStart+stats.recoveryBudgetSeconds*1000;
+  for(let pass=0;pass<2&&missingIds.length&&scenarioV322RecoveryTimeLeft();pass++){
+    let progress=0;
+    for(const id of [...missingIds]){
+      if(!scenarioV322RecoveryTimeLeft())break;
+      if(scenarioV34LiveStop(id)?.routeId){progress++;continue;}
+      const ok=scenarioV34TryEjection(id,opts,stats,2);
+      const assigned=!!scenarioV34LiveStop(id)?.routeId;
+      if(ok&&assigned){stats.recoveryVerifiedStops++;progress++;}
+      else if(ok&&!assigned)stats.recoveryPhantomPrevented++;
+    }
+    missingIds=poolIds.filter(id=>!scenarioV34LiveStop(id)?.routeId);
+    if(!progress)break;
+  }
+
+  stats.recoveryBudgetExceeded=!scenarioV322RecoveryTimeLeft()&&missingIds.length>0;
+  stats.recoverySeconds=(performance.now()-recStart)/1000;
+  scenarioV322RecoveryDeadline=0;
+
+  missingIds=poolIds.filter(id=>!scenarioV34LiveStop(id)?.routeId);
+  for(const id of missingIds){
+    const s=scenarioV34LiveStop(id);
+    if(s){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no feasible placement after V34 verified recovery';}
+  }
+
+  stats.unassignedStops=missingIds.length;
+  stats.unassignedCases=missingIds.reduce((a,id)=>a+scenarioV32Cases(scenarioV34LiveStop(id)),0);
+  stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  stats.insertionEvaluations=scenarioV322InsertionEvaluations;
+  stats.fallbackScans=scenarioV322FallbackScans;
+  stats.timeAwarePlaced=stats.initialPlacedStops;
+  stats.performanceBudgetSeconds=stats.recoveryBudgetSeconds;
+  stats.budgetExceeded=stats.recoveryBudgetExceeded;
+
+  stats.mileagePolish=opts.optMiles?scenarioV34MileagePolish(opts):{routeSequenceMoves:0,routeSequenceMilesSaved:0,crossRouteMoves:0,crossRouteMilesSaved:0,crossRouteEvaluated:0,totalMilesSaved:0,seconds:0};
+  stats.territoryAnalysis=scenarioV33TerritoryAnalysis();
+
+  stats.authoritativeAssignedStops=poolIds.filter(id=>!!scenarioV34LiveStop(id)?.routeId).length;
+  stats.authoritativeUnassignedStops=poolIds.length-stats.authoritativeAssignedStops;
+  stats.authoritativeAssignedCases=poolIds.filter(id=>!!scenarioV34LiveStop(id)?.routeId).reduce((a,id)=>a+scenarioV32Cases(scenarioV34LiveStop(id)),0);
+  stats.authoritativeUnassignedCases=Math.max(0,stats.poolCases-stats.authoritativeAssignedCases);
+  return stats;
+}
+scenarioV32BuildFromScratch=scenarioV34BuildFromScratch;
+scenarioV30BuildFromScratch=scenarioV34BuildFromScratch;
+scenarioV28BuildFromScratch=scenarioV34BuildFromScratch;
+
+const openScenarioAfterActionReportV34Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV34Base();
+  const r=scenarioLastRun,s=r?.removed?.scratchBuild;
+  if(!r||r.options?.optimizationMode!=='scratch'||!s)return;
+  const body=document.getElementById('scenario-report-body');if(!body)return;
+  for(const h of [...body.querySelectorAll('h3')]){
+    if(/^V33 Territory \/ Freight Protection Analysis/.test((h.textContent||'').trim()))h.closest('.scenario-card')?.remove();
+  }
+  const finalRetention=r.original?.shippedCases>0?(r.modeled?.shippedCases||0)/r.original.shippedCases*100:100;
+  const mp=s.mileagePolish||{};
+  const finalStops=(s.authoritativeUnassignedStops ?? s.unassignedStops ?? 0);
+  const finalCases=(s.authoritativeUnassignedCases ?? s.unassignedCases ?? 0);
+  body.insertAdjacentHTML('beforeend',
+    `<div class="scenario-card" style="margin-top:10px;border-color:rgba(34,197,94,.55);">
+      <h3>V34 Freight Integrity / Mileage Analysis</h3>
+      <div class="scenario-help">Recovery is committed and verified by live Stop ID so optimizer snapshot restores cannot create phantom recovery counts. After freight recovery, a bounded mileage polish performs route 2-opt sequencing and cross-route relocations only when modeled miles improve without losing freight or degrading feasibility/service.</div>
+      <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));">
+        <div class="scenario-kpi"><div class="v">${scenarioFmt(finalRetention,1)}%</div><div class="l">Authoritative Freight Retention</div></div>
+        <div class="scenario-kpi"><div class="v">${s.authoritativeAssignedStops||0}/${s.poolStops||0}</div><div class="l">Live Assigned Customer Stops</div></div>
+        <div class="scenario-kpi"><div class="v">${s.recoveryVerifiedStops||0}</div><div class="l">Verified Recovery Stops</div></div>
+        <div class="scenario-kpi"><div class="v">${scenarioFmt(mp.totalMilesSaved||0,1)}</div><div class="l">Miles Removed by V34 Polish</div></div>
+      </div>
+      <div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Final live unassigned:</strong> ${finalStops} stop(s) / ${scenarioFmt(finalCases,0)} cases · <strong>Phantom recoveries blocked:</strong> ${s.recoveryPhantomPrevented||0} · <strong>Ejection chains:</strong> ${s.ejectionChains||0} · <strong>Route sequence moves:</strong> ${mp.routeSequenceMoves||0} (${scenarioFmt(mp.routeSequenceMilesSaved||0,1)} mi) · <strong>Cross-route mileage moves:</strong> ${mp.crossRouteMoves||0} (${scenarioFmt(mp.crossRouteMilesSaved||0,1)} mi) · <strong>Mileage-polish runtime:</strong> ${scenarioFmt(mp.seconds||0,1)} sec.</div>
+    </div>`);
+};
+</script>
+
 </body>
 </html>
