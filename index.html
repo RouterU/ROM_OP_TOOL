@@ -4933,6 +4933,37 @@ function renderStopOrdersHtml(stop){
   </details>`;
 }
 
+
+function depotImportedStreet(row){
+  if(!row||typeof row!=='object')return '';
+  const known=gcLoose(row,[
+    'ShipStreet','ShipStreet1','Ship Street','Ship Street 1',
+    'ShipStreetName','Ship Street Name','Street Name','StreetName',
+    'Street','Address','Address1','Address 1','Street Address',
+    'ShipAddress','Ship Address','ShipAddress1','Ship Address 1',
+    'Delivery Address','Location Address'
+  ]);
+  if(sval(known))return sval(known);
+
+  // Defensive schema fallback: locate a column whose header clearly represents
+  // the physical street address. Exclude city/state/zip/cross-street fields.
+  const keys=Object.keys(row);
+  const preferred=keys.filter(k=>{
+    const n=String(k).toLowerCase().replace(/[^a-z0-9]/g,'');
+    const isAddress=n.includes('address')||n.includes('street');
+    const excluded=n.includes('cross')||n.includes('city')||n.includes('state')||
+      n.includes('zip')||n.includes('postal')||n.includes('latitude')||
+      n.includes('longitude')||n==='street2'||n==='street3'||
+      n.includes('shipstreet2')||n.includes('shipstreet3');
+    return isAddress&&!excluded;
+  });
+  for(const k of preferred){
+    const v=sval(row[k]);
+    if(v)return v;
+  }
+  return '';
+}
+
 function importDepots(data){
   data.forEach(row=>{
     const locationKey=(gcLoose(row,['LocationKey','Location Key','LocationK','LocationKey (RP)'])||'').toString().trim();
@@ -4948,7 +4979,7 @@ function importDepots(data){
       market:(gcLoose(row,['Market'])||'').toString(),
       comment:(gc(row,['Comment'])||'').toString(),
       name:(gcLoose(row,['Name','name'])||'').toString(),
-      shipStreet:(gcLoose(row,['ShipStreet','ShipStreet1','Ship Street','Ship Street 1','ShipStreetName','Ship Street Name','Street Name','StreetName','Address','Street Address'])||'').toString(),
+      shipStreet:depotImportedStreet(row),
       shipStreet2:(gc(row,['ShipStreet2','Ship Street 2'])||'').toString(),
       shipStreet3:(gc(row,['ShipStreet3','Ship Street 3'])||'').toString(),
       shipCrossStreet:(gc(row,['ShipCrossStreet','Ship Cross Street'])||'').toString(),
@@ -4960,6 +4991,7 @@ function importDepots(data){
       udfNumber1:(gc(row,['UDFNumber1','UDF Number 1'])||'').toString(),
       serviceDuration:(gcLoose(row,['ServiceDuration','Service Duration'])||'').toString(),
       requirements:(gcLoose(row,['Requirements'])||'').toString(),
+      raw:{...row},
     };
     if(existing)Object.assign(existing,obj); else depotLocations.push(obj);
   });
@@ -11387,7 +11419,12 @@ function downloadOutputTextFile(outputHeaders,outputRows){
 function routeERLiveDepotByKey(key){
   const needle=normalizeKey(key).toUpperCase();
   if(!needle)return null;
-  return depotLocations.find(d=>normalizeKey(d.locationKey).toUpperCase()===needle)||null;
+  const depot=depotLocations.find(d=>normalizeKey(d.locationKey).toUpperCase()===needle)||null;
+  if(depot&&!sval(depot.shipStreet)){
+    const recovered=depotImportedStreet(depot.raw);
+    if(recovered)depot.shipStreet=recovered;
+  }
+  return depot;
 }
 function routeInitialDepot(route){
   if(!route)return null;
@@ -11441,7 +11478,7 @@ buildOutputFileRows=function(routeIdSet=null){
     row.Address=
       depot.shipStreet||
       depot.address||
-      (depot.raw?gcLoose(depot.raw,['ShipStreet','ShipStreet1','Ship Street','Ship Street 1','ShipStreetName','Ship Street Name','Street Name','StreetName','Address','Street Address']):'')||
+      depotImportedStreet(depot.raw)||
       row.Address||'';
     row.ZipCode=depot.shipZipCode||depot.zip||row.ZipCode||'';
     row.City=depot.shipCity||depot.city||row.City||'';
