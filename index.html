@@ -11381,5 +11381,75 @@ function downloadOutputTextFile(outputHeaders,outputRows){
 }
 </script>
 
+
+<script>
+// v35.3 — DEPOT ADDRESS RETENTION / EXPORT FIX
+function routeERLiveDepotByKey(key){
+  const needle=normalizeKey(key).toUpperCase();
+  if(!needle)return null;
+  return depotLocations.find(d=>normalizeKey(d.locationKey).toUpperCase()===needle)||null;
+}
+function routeInitialDepot(route){
+  if(!route)return null;
+  return routeERLiveDepotByKey(route.initialLocationKey) || route.initialDepot || null;
+}
+function routeFinalDepot(route){
+  if(!route)return null;
+  return routeERLiveDepotByKey(route.finalLocationKey) || route.finalDepot || null;
+}
+function enrichRouteDepots(){
+  routes.forEach(route=>{
+    route.initialDepot=routeERLiveDepotByKey(route.initialLocationKey);
+    route.finalDepot=routeERLiveDepotByKey(route.finalLocationKey);
+    const dep=route.initialDepot;
+    if(dep&&dep.lat&&dep.lng){
+      route.depotLat=dep.lat;
+      route.depotLng=dep.lng;
+    }
+  });
+}
+const buildOutputFileRowsV353Base=buildOutputFileRows;
+buildOutputFileRows=function(routeIdSet=null){
+  const rows=buildOutputFileRowsV353Base(routeIdSet);
+  const normalizedRouteIds=routeIdSet?new Set(Array.from(routeIdSet).map(String)):null;
+  const outputRoutes=normalizedRouteIds?routes.filter(r=>normalizedRouteIds.has(String(r.id))):routes;
+  const routeLookup=new Map();
+  outputRoutes.forEach(r=>{
+    const key=String(exportRouteValue(r));
+    if(!routeLookup.has(key))routeLookup.set(key,[]);
+    routeLookup.get(key).push(r);
+  });
+
+  rows.forEach(row=>{
+    if(String(row.locationType||'').toUpperCase()!=='DEPOT')return;
+    const routeKey=String(row.Route||'');
+    const candidates=routeLookup.get(routeKey)||[];
+    const route=candidates[0]||null;
+    const seq=Number(row.Sequence);
+    let depot=null;
+
+    if(route){
+      const customerCount=stops.filter(s=>String(s.routeId||'')===String(route.id)).length;
+      if(seq===0)depot=routeInitialDepot(route);
+      else if(seq===customerCount+1)depot=routeFinalDepot(route);
+    }
+    depot=depot||routeERLiveDepotByKey(row.LocationKey||row.Customer);
+    if(!depot)return;
+
+    row.Customer=depot.locationKey||row.Customer||'';
+    row.LocationKey=depot.locationKey||row.LocationKey||'';
+    row.Address=depot.shipStreet||depot.address||row.Address||'';
+    row.ZipCode=depot.shipZipCode||depot.zip||row.ZipCode||'';
+    row.City=depot.shipCity||depot.city||row.City||'';
+    row.State=depot.shipState||depot.state||row.State||'';
+    row.Country=depot.country||row.Country||'US';
+    row.Latitude=depot.lat??row.Latitude??'';
+    row.Longitude=depot.lng??row.Longitude??'';
+    row.CustomerName=depot.name||depot.locationKey||row.CustomerName||'Depot';
+  });
+  return rows;
+};
+</script>
+
 </body>
 </html>
