@@ -5950,7 +5950,7 @@ function buildOutputFileRows(routeIdSet=null){
           'routename':route.name||'',
           'routeprojectedDepartedDate':outputDateOnlyFromMinutes(route,pt.depart),
           'locationType':'CUSTOMER',
-          'stoptype':orderCount(stop),
+          'stoptype':3,
           'measure1':cases,
           'measure2':parseFloat(cube.toFixed(2)),
           'measure3':parseFloat(weight.toFixed(2)),
@@ -6013,7 +6013,7 @@ function buildOutputFileRows(routeIdSet=null){
         'routename':'',
         'routeprojectedDepartedDate':'',
         'locationType':'CUSTOMER',
-        'stoptype':orderCount(stop),
+        'stoptype':3,
         'measure1':cases,
         'measure2':parseFloat(cube.toFixed(2)),
         'measure3':parseFloat(weight.toFixed(2)),
@@ -11312,6 +11312,7 @@ function systemTxtNormalizeRow(row,defaults){
   //   ServiceDuration = variable
   //   FixedserviceDuration = fixed
   if(systemTxtClean(r['locationType']).toUpperCase()==='CUSTOMER'){
+    r['stoptype']=3;
     const currentFixed=parseFloat(r['ServiceDuration']);
     const currentTotal=parseFloat(r['FixedserviceDuration']);
     if(Number.isFinite(currentFixed)&&Number.isFinite(currentTotal)){
