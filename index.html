@@ -12171,5 +12171,397 @@ scenarioV27NetworkAnalysisHtml=function(r){
 };
 </script>
 
+
+<script>
+// ============================================================================
+// v37 — INCUMBENT-SEEDED LARGE-NEIGHBORHOOD / PAIRWISE ROUTE REBUILD
+// ============================================================================
+// The Lexington test proved the 2–3 stop block neighborhood was too small:
+// 408 eligible blocks were evaluated and zero improved the network.  That is a
+// classic local optimum. V37 changes the neighborhood.
+//
+// 1) Scratch construction still runs as a challenger.
+// 2) If its INITIAL build already loses material freight, the current post-lever
+//    incumbent is restored before the expensive network optimizer. This keeps a
+//    known 100%-freight solution available instead of forcing later stages to
+//    repair a damaged construction.
+// 3) The post-build optimizer now takes TWO whole neighboring routes at a time,
+//    combines their customer pools, generates several geographic partitions,
+//    resequences both routes, re-optimizes dispatch, and accepts a repartition
+//    only when the complete network improves.
+// 4) Freight, capacity and runtime remain hard constraints.
+//
+// This can escape the local optimum that defeated single-stop, swaps and
+// 2–3-stop block moves.
+// ============================================================================
+
+function scenarioV37LiveMetrics(opts){
+  try{return scenarioClone(scenarioComputeModelMetrics(opts));}
+  catch(e){return null;}
+}
+function scenarioV37FreightCases(metrics){
+  return Math.max(0,+metrics?.shippedCases||0);
+}
+
+// ---------------------------------------------------------------------------
+// Scratch challenger guardrail.
+// ---------------------------------------------------------------------------
+const scenarioV37ScratchBuilderBase=scenarioV32BuildFromScratch;
+scenarioV32BuildFromScratch=function(opts){
+  const incumbentState=scenarioSnapshotWorkingState();
+  const incumbentMetrics=scenarioV37LiveMetrics(opts);
+
+  const stats=scenarioV37ScratchBuilderBase(opts);
+  const challengerMetrics=scenarioV37LiveMetrics(opts);
+
+  const freightPct=scenarioV37FreightCases(incumbentMetrics)>0
+    ?scenarioV37FreightCases(challengerMetrics)/scenarioV37FreightCases(incumbentMetrics)*100
+    :100;
+  const milePct=(incumbentMetrics?.miles||0)>0
+    ?((challengerMetrics?.miles||0)-(incumbentMetrics?.miles||0))/(incumbentMetrics.miles||1)*100
+    :0;
+
+  stats.v37Challenger={
+    freightPct,
+    milePct,
+    incumbentMetrics:scenarioClone(incumbentMetrics),
+    challengerMetrics:scenarioClone(challengerMetrics),
+    restoredIncumbent:false,
+    reason:''
+  };
+
+  // Initial construction is allowed a small miss because downstream ejection
+  // recovery can still help, but not a large freight deficit.  Lexington's
+  // 98.4% freight candidate starts from a worse position than a known 100%
+  // incumbent, so V37 preserves the incumbent and performs the GLOBAL rebuild
+  // from that stronger seed instead.
+  if(freightPct<99.5 || milePct>8){
+    scenarioRestoreWorkingState(incumbentState);
+    stats.v37Challenger.restoredIncumbent=true;
+    stats.v37Challenger.reason=
+      freightPct<99.5
+        ?`scratch challenger retained only ${scenarioFmt(freightPct,1)}% of incumbent freight`
+        :`scratch challenger was ${scenarioFmt(milePct,1)}% above incumbent miles`;
+
+    const livePool=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);
+    stats.initialUnassigned=stats.unassignedStops||0; // diagnostic challenger result
+    stats.unassignedStops=livePool.filter(s=>!s.routeId).length;
+    stats.unassignedCases=livePool.filter(s=>!s.routeId).reduce((a,s)=>a+scenarioStopShippedCases(s),0);
+    stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  }
+  return stats;
+};
+scenarioV30BuildFromScratch=scenarioV32BuildFromScratch;
+scenarioV28BuildFromScratch=scenarioV32BuildFromScratch;
+
+
+// ---------------------------------------------------------------------------
+// Pairwise route rebuild helpers.
+// ---------------------------------------------------------------------------
+function scenarioV37CommonDepot(routeA,routeB){
+  const a=scenarioNormalizeDepotKey(routeInitialDepot(routeA)?.locationKey||routeA?.initialLocationKey);
+  const b=scenarioNormalizeDepotKey(routeInitialDepot(routeB)?.locationKey||routeB?.initialLocationKey);
+  return !!a&&a===b;
+}
+function scenarioV37Point(stop){
+  return {x:+stop.lng,y:+stop.lat};
+}
+function scenarioV37ValidGeo(stop){
+  return Number.isFinite(+stop?.lat)&&Number.isFinite(+stop?.lng);
+}
+function scenarioV37NearestOrder(route,customers){
+  const normal=(customers||[]).filter(s=>!scenarioIsBackhaulStop(s));
+  const back=(customers||[]).filter(s=>scenarioIsBackhaulStop(s));
+  let cur=routeInitialDepot(route)||normal[0]||back[0];
+  const left=[...normal],ordered=[];
+  while(left.length){
+    let best=0,bestD=Infinity;
+    for(let i=0;i<left.length;i++){
+      const d=scenarioV32Miles(cur,left[i]);
+      if(Number.isFinite(d)&&d<bestD){bestD=d;best=i;}
+    }
+    const n=left.splice(best,1)[0];ordered.push(n);cur=n;
+  }
+  // Backhauls must remain after delivery customers.
+  while(back.length){
+    let best=0,bestD=Infinity;
+    for(let i=0;i<back.length;i++){
+      const d=scenarioV32Miles(cur,back[i]);
+      if(Number.isFinite(d)&&d<bestD){bestD=d;best=i;}
+    }
+    const n=back.splice(best,1)[0];ordered.push(n);cur=n;
+  }
+  return ordered;
+}
+function scenarioV37ProjectionCuts(customers,axis){
+  const rows=customers.filter(scenarioV37ValidGeo).map(s=>{
+    const p=scenarioV37Point(s);
+    return {s,v:p.x*axis.x+p.y*axis.y};
+  }).sort((a,b)=>a.v-b.v);
+  if(rows.length<4)return [];
+  const n=rows.length,cuts=new Set();
+  [0.30,0.38,0.45,0.50,0.55,0.62,0.70].forEach(p=>{
+    const k=Math.max(1,Math.min(n-1,Math.round(n*p)));
+    cuts.add(k);
+  });
+  return [...cuts].map(k=>[rows.slice(0,k).map(x=>x.s),rows.slice(k).map(x=>x.s)]);
+}
+function scenarioV37AngleCuts(customers,depot){
+  if(!depot||!scenarioV37ValidGeo(depot))return [];
+  const rows=customers.filter(scenarioV37ValidGeo).map(s=>{
+    let a=Math.atan2(+s.lat-(+depot.lat),+s.lng-(+depot.lng));
+    if(a<0)a+=Math.PI*2;
+    return {s,a};
+  }).sort((a,b)=>a.a-b.a);
+  const n=rows.length;if(n<4)return [];
+  // Rotate at the largest angular gap so the sweep does not split a natural
+  // territory across the 0/360-degree boundary.
+  let gap=-1,idx=0;
+  for(let i=0;i<n;i++){
+    const a=rows[i].a,b=i===n-1?rows[0].a+Math.PI*2:rows[i+1].a;
+    if(b-a>gap){gap=b-a;idx=(i+1)%n;}
+  }
+  const rotated=[...rows.slice(idx),...rows.slice(0,idx)];
+  return [0.30,0.38,0.45,0.50,0.55,0.62,0.70].map(p=>{
+    const k=Math.max(1,Math.min(n-1,Math.round(n*p)));
+    return [rotated.slice(0,k).map(x=>x.s),rotated.slice(k).map(x=>x.s)];
+  });
+}
+function scenarioV37FarthestAxis(customers){
+  const pts=customers.filter(scenarioV37ValidGeo);
+  let a=null,b=null,best=-1;
+  for(let i=0;i<pts.length;i++){
+    for(let j=i+1;j<pts.length;j++){
+      const d=scenarioV32Miles(pts[i],pts[j]);
+      if(Number.isFinite(d)&&d>best){best=d;a=pts[i];b=pts[j];}
+    }
+  }
+  if(!a||!b)return {x:1,y:0};
+  const dx=(+b.lng)-(+a.lng),dy=(+b.lat)-(+a.lat),mag=Math.hypot(dx,dy)||1;
+  return {x:dx/mag,y:dy/mag};
+}
+function scenarioV37CandidatePartitions(routeA,routeB,customers){
+  const out=[],seen=new Set();
+  const add=(g1,g2,label)=>{
+    if(!g1.length||!g2.length)return;
+    const key=g1.map(s=>s.id).sort().join('|');
+    if(seen.has(key))return;seen.add(key);out.push({g1,g2,label});
+  };
+
+  // Longitude / latitude / farthest-pair projection.
+  for(const pair of scenarioV37ProjectionCuts(customers,{x:1,y:0}))add(pair[0],pair[1],'longitude');
+  for(const pair of scenarioV37ProjectionCuts(customers,{x:0,y:1}))add(pair[0],pair[1],'latitude');
+  for(const pair of scenarioV37ProjectionCuts(customers,scenarioV37FarthestAxis(customers)))add(pair[0],pair[1],'farthest-axis');
+
+  // Depot bearing sweep.
+  const dep=routeInitialDepot(routeA)||routeFinalDepot(routeA);
+  for(const pair of scenarioV37AngleCuts(customers,dep))add(pair[0],pair[1],'bearing-sweep');
+
+  // Current-centroid Voronoi partition.
+  const ca=scenarioV32Centroid(scenarioV32RouteCustomers(routeA.id));
+  const cb=scenarioV32Centroid(scenarioV32RouteCustomers(routeB.id));
+  if(ca&&cb){
+    const g1=[],g2=[];
+    customers.forEach(s=>{
+      const da=scenarioV32Miles(s,ca),db=scenarioV32Miles(s,cb);
+      (da<=db?g1:g2).push(s);
+    });
+    add(g1,g2,'centroid-voronoi');
+  }
+  return out;
+}
+function scenarioV37PairEligibility(route,group,opts){
+  if(!group.length)return false;
+  for(const s of group){
+    if(!scenarioStopCanChangeRoute(s,opts)&&s.routeId!==route.id)return false;
+    if(!scenarioCanTargetRoute(s,route,opts))return false;
+  }
+  const cap=scenarioCapacityStatus(route,group);
+  if(cap.known&&!cap.ok)return false;
+  if(!cap.known&&group.some(s=>scenarioOriginalRouteId(s)!==route.id))return false;
+  return true;
+}
+function scenarioV37ApplyPartition(routeAId,routeBId,g1Ids,g2Ids,opts){
+  const ra=routes.find(r=>r.id===routeAId),rb=routes.find(r=>r.id===routeBId);
+  if(!ra||!rb)return false;
+  const g1=g1Ids.map(id=>stops.find(s=>s.id===id)).filter(Boolean);
+  const g2=g2Ids.map(id=>stops.find(s=>s.id===id)).filter(Boolean);
+  if(!scenarioV37PairEligibility(ra,g1,opts)||!scenarioV37PairEligibility(rb,g2,opts))return false;
+
+  g1.forEach(s=>{s.routeId=ra.id;});
+  g2.forEach(s=>{s.routeId=rb.id;});
+
+  scenarioApplyRouteOrder(ra.id,scenarioComposePreservingDepots(ra.id,scenarioV37NearestOrder(ra,g1)));
+  scenarioApplyRouteOrder(rb.id,scenarioComposePreservingDepots(rb.id,scenarioV37NearestOrder(rb,g2)));
+
+  // Deep polish both rebuilt routes.
+  try{scenarioLocalImproveRoute(ra.id,opts);}catch(e){}
+  try{scenarioLocalImproveRoute(rb.id,opts);}catch(e){}
+  if(opts.optDispatch){
+    try{scenarioOptimizeDispatch(ra,opts);}catch(e){}
+    try{scenarioOptimizeDispatch(rb,opts);}catch(e){}
+  }
+
+  const ea=scenarioEvaluateRouteCustomers(ra,scenarioV32RouteCustomers(ra.id),opts);
+  const eb=scenarioEvaluateRouteCustomers(rb,scenarioV32RouteCustomers(rb.id),opts);
+  if(!ea||!eb)return false;
+  if(!scenarioRuntimeOk(ea.sim,opts,true)||!scenarioRuntimeOk(eb.sim,opts,true))return false;
+  const ca=scenarioCapacityStatus(ra),cb=scenarioCapacityStatus(rb);
+  if((ca.known&&!ca.ok)||(cb.known&&!cb.ok))return false;
+  return true;
+}
+function scenarioV37AcceptPair(before,after,opts){
+  if(!before||!after)return false;
+  if((after.shippedCases||0)+0.01<(before.shippedCases||0))return false;
+  if((scenarioValidateRouteRuntimeLimits(opts)?.length||0)||(scenarioValidateCapacityLimits()?.length||0))return false;
+  const milesSaved=(before.miles||0)-(after.miles||0);
+  const onDelta=(after.onTimePct||0)-(before.onTimePct||0);
+  const waitDelta=(after.waitMinutes||0)-(before.waitMinutes||0);
+  const hourDelta=(after.hours||0)-(before.hours||0);
+
+  if(opts.optMiles&&milesSaved<2.0)return false;
+  if(onDelta<-0.50)return false;
+  if(waitDelta>Math.max(3,(before.waitMinutes||0)*.10))return false;
+  if(hourDelta>Math.max(.75,(before.hours||0)*.0125))return false;
+  return true;
+}
+
+function scenarioV37PairwiseRebuild(opts){
+  const stats={
+    pairsReviewed:0,
+    partitionsEvaluated:0,
+    partitionsFeasible:0,
+    pairRebuildsAccepted:0,
+    stopsReTerritoried:0,
+    milesSaved:0,
+    sequenceMoves:0,
+    dispatchChanges:0,
+    passes:0,
+    runtimeSeconds:0,
+    budgetExhausted:false
+  };
+  const started=performance.now(),deadline=started+22000;
+
+  for(let pass=0;pass<6&&performance.now()<deadline;pass++){
+    stats.passes++;
+    let best=null;
+
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+    const pairs=[];
+    for(let i=0;i<active.length;i++){
+      for(let j=i+1;j<active.length;j++){
+        if(!scenarioV37CommonDepot(active[i],active[j]))continue;
+        const d=scenarioV36RoutePairDistance(active[i],active[j]);
+        if(Number.isFinite(d))pairs.push({a:active[i].id,b:active[j].id,d});
+      }
+    }
+    // Neighboring pairs first, but review enough pairs to escape bad territories.
+    pairs.sort((x,y)=>x.d-y.d);
+
+    pairLoop:
+    for(const pair of pairs.slice(0,Math.min(30,pairs.length))){
+      if(performance.now()>=deadline)break;
+      stats.pairsReviewed++;
+
+      const a=routes.find(r=>r.id===pair.a),b=routes.find(r=>r.id===pair.b);
+      if(!a||!b)continue;
+      const customers=[...scenarioV32RouteCustomers(a.id),...scenarioV32RouteCustomers(b.id)];
+      if(customers.length<5)continue;
+
+      const partitions=scenarioV37CandidatePartitions(a,b,customers);
+      for(const part of partitions){
+        if(performance.now()>=deadline)break pairLoop;
+        stats.partitionsEvaluated++;
+        for(const orientation of [0,1]){
+          if(performance.now()>=deadline)break pairLoop;
+          const snap=scenarioSnapshotWorkingState();
+          const before=scenarioV37LiveMetrics(opts);
+          const g1=(orientation?part.g2:part.g1).map(s=>s.id);
+          const g2=(orientation?part.g1:part.g2).map(s=>s.id);
+
+          if(!scenarioV37ApplyPartition(pair.a,pair.b,g1,g2,opts)){
+            scenarioRestoreWorkingState(snap);continue;
+          }
+          stats.partitionsFeasible++;
+          const after=scenarioV37LiveMetrics(opts);
+          const milesSaved=(before?.miles||0)-(after?.miles||0);
+
+          if(scenarioV37AcceptPair(before,after,opts)){
+            const changed=customers.filter(s=>{
+              const live=stops.find(x=>x.id===s.id);
+              return live&&live.routeId!==s.routeId;
+            }).length;
+            if(!best||milesSaved>best.milesSaved){
+              best={state:scenarioSnapshotWorkingState(),milesSaved,changed,pair,partLabel:part.label,before,after};
+            }
+          }
+          scenarioRestoreWorkingState(snap);
+        }
+      }
+    }
+
+    if(!best)break;
+    scenarioRestoreWorkingState(best.state);
+    stats.pairRebuildsAccepted++;
+    stats.stopsReTerritoried+=best.changed||0;
+    stats.milesSaved+=Math.max(0,best.milesSaved||0);
+    // Restart pair ranking from improved network.
+  }
+
+  stats.budgetExhausted=performance.now()>=deadline;
+  stats.runtimeSeconds=(performance.now()-started)/1000;
+  return stats;
+}
+
+
+// ---------------------------------------------------------------------------
+// Replace v36 block search with original network optimizer + V37 pair rebuild.
+// scenarioV36IncrementalBase is the optimizer captured BEFORE v36's block layer.
+// ---------------------------------------------------------------------------
+scenarioV27IncrementalNetworkOptimize=function(opts){
+  const base=scenarioV36IncrementalBase(opts);
+  const pair=scenarioV37PairwiseRebuild(opts);
+  base.v37Pairwise=pair;
+  base.stopsReassigned=(base.stopsReassigned||0)+(pair.stopsReTerritoried||0);
+  base.localSequenceMoves=(base.localSequenceMoves||0)+(pair.sequenceMoves||0);
+  base.dispatchChanges=(base.dispatchChanges||0)+(pair.dispatchChanges||0);
+  return base;
+};
+
+
+// ---------------------------------------------------------------------------
+// Replace v36 report extension with V37 diagnostics.
+// ---------------------------------------------------------------------------
+const scenarioV37NetworkHtmlBase=scenarioV36NetworkHtmlBase;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV37NetworkHtmlBase(r);
+  const n=r?.removed?.networkAnalysis||{};
+  const p=n.v37Pairwise;
+  if(!p)return html;
+
+  const challenger=r?.removed?.scratchBuild?.v37Challenger;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(p.pairRebuildsAccepted||0)>0?'rgba(62,207,142,.6)':'rgba(245,158,11,.65)'};">
+    <h3>v37 Pairwise Global Route Rebuild</h3>
+    <div class="scenario-help">
+      V37 replaces the ineffective 2–3 stop block neighborhood with a large-neighborhood search. Two neighboring routes are combined, repartitioned using bearing/longitude/latitude/farthest-axis/centroid territory candidates, then both routes are resequenced and redispatched. The complete pair is kept only if the network preserves freight, capacity/runtime and service while materially reducing miles.
+    </div>
+    <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));">
+      <div class="scenario-kpi"><div class="v">${p.pairRebuildsAccepted||0}</div><div class="l">Pair Rebuilds Accepted</div></div>
+      <div class="scenario-kpi"><div class="v">${p.partitionsFeasible||0}</div><div class="l">Feasible Partitions</div></div>
+      <div class="scenario-kpi"><div class="v">${p.stopsReTerritoried||0}</div><div class="l">Stops Re-Territoried</div></div>
+      <div class="scenario-kpi"><div class="v">${scenarioFmt(p.milesSaved||0,1)}</div><div class="l">Modeled Miles Removed</div></div>
+    </div>
+    <div class="scenario-note">
+      <strong>Route pairs reviewed:</strong> ${(p.pairsReviewed||0).toLocaleString()} ·
+      <strong>Partitions evaluated:</strong> ${(p.partitionsEvaluated||0).toLocaleString()} ·
+      <strong>Passes:</strong> ${p.passes||0} ·
+      <strong>Runtime:</strong> ${scenarioFmt(p.runtimeSeconds||0,1)} sec ·
+      <strong>Budget exhausted:</strong> ${p.budgetExhausted?'Yes':'No'}.
+      ${challenger?.restoredIncumbent?`<br><strong>Scratch challenger fallback:</strong> ${escapeHtml(challenger.reason||'Incumbent retained as stronger seed for global rebuild.')}`:''}
+    </div>
+  </div>`;
+};
+</script>
+
 </body>
 </html>
