@@ -532,6 +532,7 @@ body{background:var(--bg0);color:var(--text1);}
           <select id="route-sort" class="route-sort" onchange="setRouteSort(this.value)" title="Optional route sorting">
             <option value="">Sort By...</option>
             <option value="name">Name</option>
+            <option value="routeNumber">Route Number</option>
             <option value="stops">Stops Per Route</option>
             <option value="time">Total Time</option>
             <option value="miles">Miles</option>
@@ -556,6 +557,16 @@ body{background:var(--bg0);color:var(--text1);}
             <button class="btn success" id="assign-potential-btn" style="display:none;padding:2px 7px;font-size:9px;" onclick="assignToPotentialRoutes()">Assign to Potential Routes</button>
             <input id="order-route-filter" class="order-route-filter" type="search" list="order-route-options" placeholder="Standard Route" title="Select or enter an order Standard Route" oninput="setOrderRouteFilter(this.value)"/>
             <datalist id="order-route-options"></datalist>
+            <select id="ua-sort" class="route-sort" onchange="setUASort(this.value)" title="Sort unassigned stops">
+              <option value="">Sort By...</option>
+              <option value="name">Name</option>
+              <option value="locationKey">Location Key</option>
+              <option value="cases">Cases</option>
+            </select>
+            <select id="ua-sort-direction" class="route-sort" onchange="setUASortDirection(this.value)" title="Change unassigned sort direction">
+              <option value="desc">High → Low</option>
+              <option value="asc">Low → High</option>
+            </select>
             <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="showSelectedUnassignedOnMap()">Show Selected</button>
             <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="checkAllUA(true)">All</button>
             <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="checkAllUA(false)">None</button>
@@ -1052,6 +1063,8 @@ let routeSort=""; // optional route sort; blank keeps import/original order
 let routeNumberFilter=""; // optional UDFNumber1 route filter
 let orderRouteFilter=""; // optional Orders Standard Route filter
 let routeSortDirection="desc"; // high-to-low by default
+let uaSort=""; // optional unassigned-stop sort
+let uaSortDirection="asc"; // names/location keys default A-Z / low-high
 let activeRouteFilterId=null;
 let activeStopFilterId=null;
 let mapRouteFilterActiveId=null;
@@ -1885,6 +1898,7 @@ function sortedRoutesForDisplay(){
     if(routeSort==='stops')comparison=stops.filter(s=>s.routeId===a.id).length-stops.filter(s=>s.routeId===b.id).length;
     else if(routeSort==='time')comparison=routeTotalMinutes(a.id)-routeTotalMinutes(b.id);
     else if(routeSort==='miles')comparison=routeDistanceMiles(a.id)-routeDistanceMiles(b.id);
+    else if(routeSort==='routeNumber')comparison=(a.udfNumber1||'').toString().localeCompare((b.udfNumber1||'').toString(),undefined,{numeric:true,sensitivity:'base'});
     else if(routeSort==='name')comparison=(a.name||'').localeCompare(b.name||'');
     if(comparison===0)return (a.name||'').localeCompare(b.name||'');
     return comparison*direction;
@@ -1894,7 +1908,7 @@ function sortedRoutesForDisplay(){
 function updateRouteSortDirectionLabels(){
   const directionSelect=document.getElementById('route-sort-direction');
   if(!directionSelect)return;
-  const isName=routeSort==='name';
+  const isName=routeSort==='name'||routeSort==='routeNumber';
   const desc=directionSelect.querySelector('option[value="desc"]');
   const asc=directionSelect.querySelector('option[value="asc"]');
   if(desc)desc.textContent=isName?'Z → A':'High → Low';
@@ -1998,12 +2012,59 @@ function renderRoutes(){
   }).join('');
 }
 
+
+function sortedUnassignedForDisplay(list){
+  const rows=[...(list||[])];
+  if(!uaSort)return rows;
+  const direction=uaSortDirection==='asc'?1:-1;
+  rows.sort((a,b)=>{
+    let comparison=0;
+    if(uaSort==='cases')comparison=tCases(a)-tCases(b);
+    else if(uaSort==='locationKey'){
+      comparison=(a.locationKey||'').toString().localeCompare((b.locationKey||'').toString(),undefined,{numeric:true,sensitivity:'base'});
+    }else if(uaSort==='name'){
+      comparison=(a.customerName||'').toString().localeCompare((b.customerName||'').toString(),undefined,{numeric:true,sensitivity:'base'});
+    }
+    if(comparison===0){
+      comparison=(a.customerName||'').toString().localeCompare((b.customerName||'').toString(),undefined,{numeric:true,sensitivity:'base'});
+    }
+    return comparison*direction;
+  });
+  return rows;
+}
+function updateUASortDirectionLabels(){
+  const directionSelect=document.getElementById('ua-sort-direction');
+  if(!directionSelect)return;
+  const alpha=uaSort==='name'||uaSort==='locationKey';
+  const desc=directionSelect.querySelector('option[value="desc"]');
+  const asc=directionSelect.querySelector('option[value="asc"]');
+  if(desc)desc.textContent=alpha?'Z → A':'High → Low';
+  if(asc)asc.textContent=alpha?'A → Z':'Low → High';
+}
+function setUASort(value){
+  uaSort=value||'';
+  // Give alphabetical sorts a natural A-Z default when first selected.
+  if(uaSort==='name'||uaSort==='locationKey')uaSortDirection='asc';
+  else if(uaSort==='cases')uaSortDirection='desc';
+  updateUASortDirectionLabels();
+  renderUA();
+}
+function setUASortDirection(value){
+  uaSortDirection=value==='desc'?'desc':'asc';
+  renderUA();
+}
+
 function renderUA(){
   const el=document.getElementById('ua-list');
   const orderRouteFilterEl=document.getElementById('order-route-filter');
   if(orderRouteFilterEl&&orderRouteFilterEl.value!==orderRouteFilter)orderRouteFilterEl.value=orderRouteFilter;
   populateFilterDatalist('order-route-options',stops.filter(s=>!s.routeId).map(s=>s.standardRoute));
-  const ua=stops.filter(s=>!s.routeId).filter(stopMatchesFilter);
+  const uaSortEl=document.getElementById('ua-sort');
+  if(uaSortEl)uaSortEl.value=uaSort;
+  const uaDirectionEl=document.getElementById('ua-sort-direction');
+  if(uaDirectionEl)uaDirectionEl.value=uaSortDirection;
+  updateUASortDirectionLabels();
+  const ua=sortedUnassignedForDisplay(stops.filter(s=>!s.routeId).filter(stopMatchesFilter));
   document.getElementById('ua-badge').innerHTML=(activeStopFilterId||orderRouteFilter)?`<span class="filter-pill" onclick="activeStopFilterId=null;orderRouteFilter='';renderRoutes();renderUA()">${ua.length} Stop${ua.length===1?'':'s'} ×</span>`:ua.length+' stops';
   if(!ua.length){
     el.innerHTML='<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><p>All stops assigned!</p></div>';
