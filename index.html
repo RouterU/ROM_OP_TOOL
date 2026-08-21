@@ -425,22 +425,17 @@ body{background:var(--bg0);color:var(--text1);}
 
 <style>
 /* ==========================================================================
-   v35.7 — Leaflet browser-zoom tile seam fix
-   Browser page zoom below/above 100% can place Leaflet's 256px tiles on
-   fractional device pixels, exposing 1px seams between adjacent raster tiles.
-   A 1px overlap hides those seams without changing map coordinates.
+   v35.8 — Chromium/Edge Leaflet tile-seam fix
+   Do NOT resize Leaflet's 256px tiles. Changing tile dimensions created visible
+   grid lines at normal 100% browser zoom.
+
+   Chromium can expose fractional-pixel seams between adjacent Leaflet raster
+   tiles when browser page zoom / Windows display scaling produces a fractional
+   devicePixelRatio. Leaflet's recommended Chromium mitigation is plus-lighter
+   blending on tile images.
    ========================================================================== */
-#map .leaflet-tile{
-  width:257px !important;
-  height:257px !important;
-  max-width:none !important;
-  backface-visibility:hidden;
-  -webkit-backface-visibility:hidden;
-}
-#map .leaflet-tile-container{
-  backface-visibility:hidden;
-  -webkit-backface-visibility:hidden;
-  transform-style:preserve-3d;
+.leaflet-container img.leaflet-tile{
+  mix-blend-mode: plus-lighter;
 }
 </style>
 
@@ -11577,23 +11572,22 @@ buildOutputFileRows=function(routeIdSet=null){
 
 
 <script>
-// v35.7 — keep Leaflet dimensions synchronized after browser page zoom/rescale.
-// Edge/Chrome page zoom fires viewport resize events. Recalculating the map
-// size prevents stale tile-pane dimensions after the browser rescales the UI.
-let routeERMapResizeTimer=null;
-function routeERRefreshMapAfterViewportScale(){
-  clearTimeout(routeERMapResizeTimer);
-  routeERMapResizeTimer=setTimeout(()=>{
-    if(typeof map!=='undefined' && map){
-      try{
+// v35.8 — refresh Leaflet's viewport dimensions when Edge/Chrome page zoom
+// changes. This does not alter tile size or map coordinates.
+let routeERZoomResizeTimer=null;
+function routeERRefreshLeafletViewport(){
+  clearTimeout(routeERZoomResizeTimer);
+  routeERZoomResizeTimer=setTimeout(()=>{
+    try{
+      if(typeof map!=='undefined' && map){
         map.invalidateSize({pan:false,animate:false});
-      }catch(e){}
-    }
-  },120);
+      }
+    }catch(e){}
+  },100);
 }
-window.addEventListener('resize',routeERRefreshMapAfterViewportScale,{passive:true});
+window.addEventListener('resize',routeERRefreshLeafletViewport,{passive:true});
 if(window.visualViewport){
-  window.visualViewport.addEventListener('resize',routeERRefreshMapAfterViewportScale,{passive:true});
+  window.visualViewport.addEventListener('resize',routeERRefreshLeafletViewport,{passive:true});
 }
 </script>
 
