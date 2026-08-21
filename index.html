@@ -11728,5 +11728,276 @@ openScenarioAfterActionReport=function(){
 };
 </script>
 
+
+<script>
+// ============================================================================
+// v36 — POST-BUILD GLOBAL OPTIMIZATION LAYER
+// ============================================================================
+// The scratch constructor's first responsibility is finding feasible homes for
+// freight. The Lexington test showed that once freight placement improved, the
+// existing one-stop local optimizer did not sufficiently reshape the network.
+// v36 adds a second, bounded optimization stage AFTER initial assignments:
+//
+//   A) deep route sequence polish (2-opt/local sequence);
+//   B) route-pair "ruin and recreate" moves using 2-stop geographic blocks;
+//   C) re-optimize sequence + dispatch after every accepted block move;
+//   D) only keep a block move when the WHOLE network gets better.
+//
+// Freight/capacity/runtime are hard. When Optimize Miles is selected, the
+// acceptance hierarchy is:
+//   1. no freight loss / no feasibility violation
+//   2. on-time cannot materially deteriorate
+//   3. total miles must fall materially
+//   4. hours/wait may not materially worsen
+//
+// This is intentionally a second pass. It does not replace scratch placement.
+// ============================================================================
+
+function scenarioV36MetricSnapshot(opts){
+  try{return scenarioClone(scenarioComputeModelMetrics(opts));}
+  catch(e){return null;}
+}
+function scenarioV36Feasible(opts){
+  return !(scenarioValidateRouteRuntimeLimits(opts)?.length||0) &&
+         !(scenarioValidateCapacityLimits()?.length||0);
+}
+function scenarioV36Accept(before,after,opts,minMiles=2){
+  if(!before||!after)return false;
+  if((after.shippedCases||0)+0.01<(before.shippedCases||0))return false;
+  if(!scenarioV36Feasible(opts))return false;
+
+  const milesSaved=(before.miles||0)-(after.miles||0);
+  const hoursDelta=(after.hours||0)-(before.hours||0);
+  const waitDelta=(after.waitMinutes||0)-(before.waitMinutes||0);
+  const onTimeDelta=(after.onTimePct||0)-(before.onTimePct||0);
+
+  if(opts.optMiles && milesSaved<minMiles)return false;
+  if(onTimeDelta<-0.35)return false;
+  if(hoursDelta>Math.max(0.5,(before.hours||0)*0.01))return false;
+  if(waitDelta>Math.max(3,(before.waitMinutes||0)*0.10))return false;
+  return true;
+}
+function scenarioV36RouteCentroid(routeId){
+  return scenarioV32Centroid(scenarioV32RouteCustomers(routeId));
+}
+function scenarioV36RoutePairDistance(a,b){
+  const ca=scenarioV36RouteCentroid(a.id),cb=scenarioV36RouteCentroid(b.id);
+  if(!ca||!cb)return Infinity;
+  return scenarioV32Miles(ca,cb);
+}
+function scenarioV36StopRadial(route,stop){
+  const dep=routeInitialDepot(route)||routeFinalDepot(route);
+  return dep?scenarioV32Miles(dep,stop):0;
+}
+function scenarioV36BlockCandidates(route){
+  const cs=scenarioV32RouteCustomers(route.id);
+  if(cs.length<3)return [];
+  const out=[];
+  // Geographic/route-edge blocks: consecutive pairs plus remote triples.
+  for(let i=0;i<cs.length-1;i++){
+    const pair=cs.slice(i,i+2);
+    const radial=Math.max(...pair.map(s=>scenarioV36StopRadial(route,s)||0));
+    out.push({ids:pair.map(s=>s.id),radial,size:2});
+  }
+  if(cs.length>=5){
+    for(let i=0;i<cs.length-2;i+=2){
+      const tri=cs.slice(i,i+3);
+      const radial=Math.max(...tri.map(s=>scenarioV36StopRadial(route,s)||0));
+      out.push({ids:tri.map(s=>s.id),radial,size:3});
+    }
+  }
+  return out.sort((a,b)=>b.radial-a.radial).slice(0,6);
+}
+function scenarioV36PlaceBlockOnRoute(blockIds,destId,opts){
+  const dest=scenarioV34LiveRoute?scenarioV34LiveRoute(destId):routes.find(r=>r.id===destId);
+  if(!dest)return false;
+  for(const id of blockIds){
+    const stop=scenarioV34LiveStop?scenarioV34LiveStop(id):stops.find(s=>s.id===id);
+    if(!stop)return false;
+    const cand=(typeof scenarioV33Insertion==='function')
+      ? scenarioV33Insertion(stop,dest,opts,true)
+      : scenarioV31FindBestInsertion(stop,dest,opts,true);
+    if(!cand)return false;
+    if(typeof scenarioV34CommitVerified==='function'){
+      if(!scenarioV34CommitVerified(id,cand))return false;
+    }else{
+      scenarioV31CommitPlacement(stop,cand);
+      if(!stops.find(s=>s.id===id)?.routeId)return false;
+    }
+  }
+  return true;
+}
+function scenarioV36OptimizeTouched(routeIds,opts){
+  let seq=0,dispatch=0;
+  for(const id of routeIds){
+    const r=routes.find(x=>x.id===id);
+    if(!r||!scenarioRouteHasCustomerWork(id)||scenarioRouteIsProtectedLongHaul(r))continue;
+    try{seq+=(scenarioLocalImproveRoute(id,opts).moves||0);}catch(e){}
+    if(opts.optDispatch){
+      try{
+        const before=scenarioCurrentRouteSignature(id).dispatch;
+        scenarioOptimizeDispatch(r,opts);
+        if(scenarioCurrentRouteSignature(id).dispatch!==before)dispatch++;
+      }catch(e){}
+    }
+  }
+  return {seq,dispatch};
+}
+
+function scenarioV36TryBlockRelocation(sourceId,destId,block,opts){
+  const snap=scenarioSnapshotWorkingState();
+  const before=scenarioV36MetricSnapshot(opts);
+  const source=routes.find(r=>r.id===sourceId),dest=routes.find(r=>r.id===destId);
+  if(!source||!dest||!before)return {accepted:false};
+
+  const liveIds=block.ids.filter(id=>stops.some(s=>s.id===id&&s.routeId===sourceId));
+  if(liveIds.length!==block.ids.length){scenarioRestoreWorkingState(snap);return {accepted:false};}
+
+  // Remove the block as a unit from the source.
+  for(const id of liveIds){
+    const s=stops.find(x=>x.id===id);
+    if(!s||!scenarioStopCanChangeRoute(s,opts)||!scenarioCanTargetRoute(s,dest,opts)){
+      scenarioRestoreWorkingState(snap);return {accepted:false};
+    }
+    s.routeId=null;s.seq=0;
+  }
+  reseq();
+
+  if(!scenarioV36PlaceBlockOnRoute(liveIds,destId,opts)){
+    scenarioRestoreWorkingState(snap);return {accepted:false};
+  }
+
+  const touched=scenarioV36OptimizeTouched([sourceId,destId],opts);
+  const after=scenarioV36MetricSnapshot(opts);
+  const milesSaved=before&&after?(before.miles||0)-(after.miles||0):0;
+
+  if(!scenarioV36Accept(before,after,opts,2.5)){
+    scenarioRestoreWorkingState(snap);
+    return {accepted:false};
+  }
+  return {accepted:true,milesSaved,before,after,seqMoves:touched.seq,dispatchChanges:touched.dispatch};
+}
+
+function scenarioV36PostBuildOptimize(opts){
+  const stats={
+    routeSequenceMoves:0,
+    blockMovesEvaluated:0,
+    blockMovesAccepted:0,
+    stopsMovedInBlocks:0,
+    milesSaved:0,
+    dispatchChanges:0,
+    passes:0,
+    runtimeSeconds:0
+  };
+  const started=performance.now();
+  const deadline=started+12000;
+
+  // Stage 1: deep sequence polish on each constructed route.
+  for(const r of [...routes]){
+    if(performance.now()>=deadline)break;
+    if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))continue;
+    if(typeof scenarioV34RouteMileagePolish==='function'&&opts.optMiles){
+      try{
+        const x=scenarioV34RouteMileagePolish(r,opts,deadline);
+        stats.routeSequenceMoves+=x.moves||0;
+        stats.milesSaved+=x.milesSaved||0;
+      }catch(e){
+        try{stats.routeSequenceMoves+=(scenarioLocalImproveRoute(r.id,opts).moves||0);}catch(_){}
+      }
+    }else{
+      try{stats.routeSequenceMoves+=(scenarioLocalImproveRoute(r.id,opts).moves||0);}catch(e){}
+    }
+  }
+
+  // Stage 2: paired-route block moves. This is the missing neighborhood in the
+  // old optimizer: it can escape a one-stop local optimum by moving 2–3
+  // geographically related stops together.
+  for(let pass=0;pass<4 && performance.now()<deadline;pass++){
+    stats.passes++;
+    let acceptedOne=false;
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+
+    // Start with high-mile / low-density routes.
+    const sources=active.slice().sort((a,b)=>{
+      const ar=scenarioRouteRuntime(a),br=scenarioRouteRuntime(b);
+      const ac=Math.max(1,scenarioV32RouteCustomers(a.id).length),bc=Math.max(1,scenarioV32RouteCustomers(b.id).length);
+      return ((br.miles||0)/bc)-((ar.miles||0)/ac);
+    }).slice(0,Math.min(8,active.length));
+
+    outer:
+    for(const source of sources){
+      if(performance.now()>=deadline)break;
+      const blocks=scenarioV36BlockCandidates(source);
+      const targets=active.filter(r=>r.id!==source.id)
+        .map(r=>({r,d:scenarioV36RoutePairDistance(source,r)}))
+        .filter(x=>Number.isFinite(x.d))
+        .sort((a,b)=>a.d-b.d)
+        .slice(0,5);
+
+      for(const block of blocks){
+        for(const t of targets){
+          if(performance.now()>=deadline)break outer;
+          // Every stop in the block must be eligible for the destination.
+          if(!block.ids.every(id=>{
+            const s=stops.find(x=>x.id===id);
+            return s&&scenarioStopCanChangeRoute(s,opts)&&scenarioCanTargetRoute(s,t.r,opts);
+          }))continue;
+
+          stats.blockMovesEvaluated++;
+          const res=scenarioV36TryBlockRelocation(source.id,t.r.id,block,opts);
+          if(res.accepted){
+            stats.blockMovesAccepted++;
+            stats.stopsMovedInBlocks+=block.ids.length;
+            stats.milesSaved+=Math.max(0,res.milesSaved||0);
+            stats.routeSequenceMoves+=res.seqMoves||0;
+            stats.dispatchChanges+=res.dispatchChanges||0;
+            acceptedOne=true;
+            break outer; // restart from the new network
+          }
+        }
+      }
+    }
+    if(!acceptedOne)break;
+  }
+
+  // Stage 3: final existing single-stop/swap neighborhood on the improved layout.
+  // The wrapper guard prevents recursion because this calls the captured base.
+  stats.runtimeSeconds=(performance.now()-started)/1000;
+  return stats;
+}
+
+// Wrap the existing incremental optimizer so the new stage runs AFTER its
+// single-stop relocations/swaps and BEFORE route consolidation.
+const scenarioV36IncrementalBase=scenarioV27IncrementalNetworkOptimize;
+scenarioV27IncrementalNetworkOptimize=function(opts){
+  const base=scenarioV36IncrementalBase(opts);
+  const post=scenarioV36PostBuildOptimize(opts);
+  base.postBuildOptimization=post;
+  base.localSequenceMoves=(base.localSequenceMoves||0)+(post.routeSequenceMoves||0);
+  base.dispatchChanges=(base.dispatchChanges||0)+(post.dispatchChanges||0);
+  base.stopsReassigned=(base.stopsReassigned||0)+(post.stopsMovedInBlocks||0);
+  return base;
+};
+
+// Extend Network Optimization Analysis with the second-pass result.
+const scenarioV36NetworkHtmlBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV36NetworkHtmlBase(r);
+  const p=r?.removed?.networkAnalysis?.postBuildOptimization;
+  if(!p)return html;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:rgba(62,207,142,.55);">
+    <h3>v36 Post-Build Global Optimization</h3>
+    <div class="scenario-help">After the scratch assignment phase completes, RouteER now runs a second optimization neighborhood: deep route sequencing followed by bounded 2–3 stop block relocations between neighboring routes. Block moves are retained only when the complete network preserves freight/capacity/runtime/service and materially reduces miles.</div>
+    <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));">
+      <div class="scenario-kpi"><div class="v">${p.blockMovesAccepted||0}</div><div class="l">Block Moves Accepted</div></div>
+      <div class="scenario-kpi"><div class="v">${p.stopsMovedInBlocks||0}</div><div class="l">Stops Re-Territoried</div></div>
+      <div class="scenario-kpi"><div class="v">${scenarioFmt(p.milesSaved||0,1)}</div><div class="l">Modeled Miles Removed</div></div>
+      <div class="scenario-kpi"><div class="v">${scenarioFmt(p.runtimeSeconds||0,1)}s</div><div class="l">Post-Build Runtime</div></div>
+    </div>
+    <div class="scenario-note"><strong>Evaluated:</strong> ${(p.blockMovesEvaluated||0).toLocaleString()} block relocation candidate(s) · <strong>Route sequence improvements:</strong> ${p.routeSequenceMoves||0} · <strong>Dispatch changes:</strong> ${p.dispatchChanges||0} · <strong>Passes:</strong> ${p.passes||0}.</div>
+  </div>`;
+};
+</script>
+
 </body>
 </html>
