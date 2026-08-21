@@ -422,6 +422,28 @@ body{background:var(--bg0);color:var(--text1);}
   #route-manifest-modal > .modal.manifest-modal{width:98vw;max-width:98vw;height:94vh;max-height:94vh;padding:12px;}
 }
 </style>
+
+<style>
+/* ==========================================================================
+   v35.7 — Leaflet browser-zoom tile seam fix
+   Browser page zoom below/above 100% can place Leaflet's 256px tiles on
+   fractional device pixels, exposing 1px seams between adjacent raster tiles.
+   A 1px overlap hides those seams without changing map coordinates.
+   ========================================================================== */
+#map .leaflet-tile{
+  width:257px !important;
+  height:257px !important;
+  max-width:none !important;
+  backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;
+}
+#map .leaflet-tile-container{
+  backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;
+  transform-style:preserve-3d;
+}
+</style>
+
 </head>
 <body>
 
@@ -11551,6 +11573,28 @@ buildOutputFileRows=function(routeIdSet=null){
   });
   return rows;
 };
+</script>
+
+
+<script>
+// v35.7 — keep Leaflet dimensions synchronized after browser page zoom/rescale.
+// Edge/Chrome page zoom fires viewport resize events. Recalculating the map
+// size prevents stale tile-pane dimensions after the browser rescales the UI.
+let routeERMapResizeTimer=null;
+function routeERRefreshMapAfterViewportScale(){
+  clearTimeout(routeERMapResizeTimer);
+  routeERMapResizeTimer=setTimeout(()=>{
+    if(typeof map!=='undefined' && map){
+      try{
+        map.invalidateSize({pan:false,animate:false});
+      }catch(e){}
+    }
+  },120);
+}
+window.addEventListener('resize',routeERRefreshMapAfterViewportScale,{passive:true});
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',routeERRefreshMapAfterViewportScale,{passive:true});
+}
 </script>
 
 </body>
