@@ -11591,5 +11591,142 @@ if(window.visualViewport){
 }
 </script>
 
+
+<script>
+// ============================================================================
+// v35.9 — SCENARIO MAX RUNTIME MUST EXPAND THE SCRATCH RESOURCE WINDOW
+// ============================================================================
+// Root cause found in the Lexington Tuesday test:
+// scenarioV31BestDispatchForOrder() was enforcing TWO independent end limits:
+//   1) scenarioRuntimeOk(...), which correctly used the Scenario Lever max (14h)
+//   2) scenarioV31ResourceWindow(), which ALWAYS used the imported RouteStart /
+//      RouteEnd and rejected any insertion ending after that historical end.
+//
+// Result: entering 14 hours did not actually give the scratch builder 14 hours.
+// A route whose imported historical availability was 8–10h was still capped at
+// that old end time during every placement attempt. This produced thousands of
+// "capacity/runtime" rejections and stranded otherwise serviceable freight.
+//
+// v35.9 makes the scenario lever authoritative when a Min/Max runtime is entered.
+// Imported resource availability remains the fallback when the scenario field is
+// blank. Capacity remains hard. The 14h runtime remains hard.
+// ============================================================================
+
+function scenarioV359ResourceWindow(route, opts){
+  const importedStart=scenarioEpochMinutes(route?.routeData?.routeStart||route?.routeSummaryStart||'');
+  const importedEnd=scenarioEpochMinutes(route?.routeData?.routeEnd||route?.routeSummaryEnd||'');
+  const orig=scenarioOriginalStart(route);
+
+  // Use the imported/start anchor as the beginning of the resource day.
+  const start=Number.isFinite(importedStart)?importedStart:orig;
+
+  // If the user entered a Scenario Lever Maximum Route Run Time, it must be the
+  // actual scratch-model availability window — not merely a second runtime test.
+  const leverMax=Math.max(0,parseFloat(opts?.maxRouteHours)||0);
+  if(!opts?.runtimeUseResourceMax && leverMax>0 && Number.isFinite(start)){
+    return {start,end:start+leverMax*60,source:'Scenario Lever Maximum Route Run Time'};
+  }
+
+  // Blank Scenario Lever = preserve the imported resource availability.
+  if(Number.isFinite(importedStart)&&Number.isFinite(importedEnd)&&importedEnd>importedStart){
+    return {start:importedStart,end:importedEnd,source:'Imported RouteStart / RouteEnd'};
+  }
+
+  const lim=scenarioV28RuntimeLimits(route,opts||{runtimeUseResourceMin:true,runtimeUseResourceMax:true});
+  return {
+    start,
+    end:Number.isFinite(start)&&lim.max>0?start+lim.max*60:null,
+    source:opts?.runtimeUseResourceMax?'Imported Resource Max Runtime':'Scenario Runtime'
+  };
+}
+
+// Keep the legacy function available to older callers, but make it read the
+// current scenario settings so scratch construction and dispatch optimization
+// see the same availability rule the user selected in Scenario Levers.
+scenarioV31ResourceWindow=function(route){
+  let opts={};
+  try{ opts=scenarioReadOptions()||{}; }catch(e){}
+  return scenarioV359ResourceWindow(route,opts);
+};
+
+// Override dispatch evaluation explicitly as well, avoiding any ambiguity about
+// which runtime settings are active during scratch placement.
+scenarioV31BestDispatchForOrder=function(route,customers,opts,relaxed=false){
+  const order=scenarioComposePreservingDepots(route.id,scenarioOrderCustomersForSpecialRules(customers||[]));
+  const win=scenarioV359ResourceWindow(route,opts);
+  const orig=scenarioOriginalStart(route);
+  let starts=[];
+
+  if(opts.optDispatch){
+    const lo=Number.isFinite(win.start)?win.start:orig-120;
+    // Search the full available scenario window. Runtime feasibility below
+    // remains the hard protection against exceeding the selected max.
+    const hi=Number.isFinite(win.end)?Math.max(lo,win.end-30):orig+480;
+    for(let s=lo;s<=hi;s+=10)starts.push(s);
+    if(Number.isFinite(orig)&&!starts.some(x=>Math.abs(x-orig)<1))starts.push(orig);
+  }else{
+    starts=[orig];
+  }
+
+  let best=null;
+  const allowed=Math.max(0,+opts.allowedWaitMinutes||5);
+
+  for(const start of starts){
+    if(!Number.isFinite(start))continue;
+    const sim=scenarioEvaluateOrderedRoute(route,order,start);
+
+    // The availability end now follows the selected Scenario Lever maximum.
+    if(Number.isFinite(win.end)&&sim.endEpoch>win.end+1e-6)continue;
+
+    // Runtime and truck capacity remain hard feasibility constraints.
+    if(!scenarioRuntimeOk(sim,opts,true))continue;
+
+    const ws=scenarioV31WaitShape(sim,allowed);
+    if(!relaxed&&ws.maxWait>60+1e-6)continue;
+    if(relaxed&&ws.maxWait>120+1e-6)continue;
+
+    const score=(sim.late||0)*9e7
+      +ws.score
+      +sim.hours*(opts.optTime?6500:1200)
+      +sim.miles*(opts.optMiles?350:80)
+      +Math.abs(start-orig)*0.5;
+
+    if(!best||score<best.score){
+      best={start,sim,order,score,wait:ws,resourceWindowSource:win.source};
+    }
+  }
+  return best;
+};
+
+// Add a diagnostic card so test reports prove which limit was actually used.
+const openScenarioAfterActionReportV359Base=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  openScenarioAfterActionReportV359Base();
+  const r=scenarioLastRun;
+  if(!r||r.mode!=='full'||r.options?.optimizationMode!=='scratch')return;
+  const body=document.getElementById('scenario-report-body');
+  if(!body)return;
+
+  const o=r.options||{};
+  const leverMax=Math.max(0,parseFloat(o.maxRouteHours)||0);
+  const source=(!o.runtimeUseResourceMax&&leverMax>0)
+    ? `Scenario Lever — ${scenarioFmt(leverMax,1)} hour hard maximum`
+    : 'Imported per-resource maximum runtime';
+
+  body.insertAdjacentHTML('beforeend',
+    `<div class="scenario-card" style="margin-top:10px;border-color:rgba(62,207,142,.55);">
+      <h3>v35.9 Runtime Availability Check</h3>
+      <div class="scenario-help">
+        Scratch placement now uses the same maximum route runtime selected in Scenario Levers when determining how late a resource may operate. The historical imported RouteEnd no longer silently overrides a manually entered maximum.
+      </div>
+      <div class="scenario-note" style="margin-top:7px;">
+        <strong>Scratch resource-window source:</strong> ${escapeHtml(source)} ·
+        <strong>Capacity:</strong> hard ·
+        <strong>Maximum runtime:</strong> hard.
+      </div>
+    </div>`);
+};
+</script>
+
 </body>
 </html>
