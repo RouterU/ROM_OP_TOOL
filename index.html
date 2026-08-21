@@ -11999,5 +11999,177 @@ scenarioV27NetworkAnalysisHtml=function(r){
 };
 </script>
 
+
+<script>
+// ============================================================================
+// v36.1 — POST-BUILD BUDGET / EXECUTION FIX
+// ============================================================================
+// v36's Post-Build report showed:
+//   Runtime: 12.0 sec
+//   Block candidates evaluated: 0
+//
+// Root cause:
+// Stage 1 called the already-expensive V34 route mileage polish AGAIN and gave
+// it the SAME 12-second deadline as Stage 2. The sequence polish consumed the
+// full budget before the block-relocation loop began. V34 had already performed
+// route sequencing earlier in the scratch build, so this was duplicate work.
+//
+// v36.1:
+//   • does not repeat V34's full 2-opt stage;
+//   • gives block re-territory optimization its OWN 16-second budget;
+//   • performs only a quick local sequence touch before block search;
+//   • refreshes live route objects after snapshot restores;
+//   • reports attempted/evaluated/accepted block moves separately.
+// ============================================================================
+
+function scenarioV361PostBuildOptimize(opts){
+  const stats={
+    routeSequenceMoves:0,
+    blockMovesAttempted:0,
+    blockMovesEvaluated:0,
+    blockMovesAccepted:0,
+    stopsMovedInBlocks:0,
+    milesSaved:0,
+    dispatchChanges:0,
+    passes:0,
+    runtimeSeconds:0,
+    budgetExhausted:false
+  };
+
+  const started=performance.now();
+
+  // Quick sequence touch only. The V34 scratch builder has already run the
+  // expensive route-level mileage polish before this network stage.
+  const quickDeadline=performance.now()+1800;
+  for(const id of routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).map(r=>r.id)){
+    if(performance.now()>=quickDeadline)break;
+    const r=routes.find(x=>x.id===id);
+    if(!r||scenarioRouteIsProtectedLongHaul(r))continue;
+    try{
+      const x=scenarioLocalImproveRoute(id,opts);
+      stats.routeSequenceMoves+=x?.moves||0;
+    }catch(e){}
+  }
+
+  // Dedicated budget for the neighborhood that v36 was supposed to test.
+  const blockDeadline=performance.now()+16000;
+
+  for(let pass=0;pass<6 && performance.now()<blockDeadline;pass++){
+    stats.passes++;
+    let acceptedOne=false;
+
+    const activeIds=routes
+      .filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r))
+      .map(r=>r.id);
+
+    // Highest miles-per-stop routes first: these are the best candidates for
+    // territory cleanup.
+    const sourceIds=activeIds.slice().sort((aid,bid)=>{
+      const a=routes.find(r=>r.id===aid),b=routes.find(r=>r.id===bid);
+      const ar=scenarioRouteRuntime(a),br=scenarioRouteRuntime(b);
+      const ac=Math.max(1,scenarioV32RouteCustomers(aid).length);
+      const bc=Math.max(1,scenarioV32RouteCustomers(bid).length);
+      return ((br?.miles||0)/bc)-((ar?.miles||0)/ac);
+    });
+
+    outer:
+    for(const sourceId of sourceIds){
+      if(performance.now()>=blockDeadline)break;
+      const source=routes.find(r=>r.id===sourceId);
+      if(!source)continue;
+
+      const blocks=scenarioV36BlockCandidates(source);
+      if(!blocks.length)continue;
+
+      // Recompute target geography from live route IDs every time because failed
+      // candidate tests can restore a cloned global state.
+      const targetIds=activeIds
+        .filter(id=>id!==sourceId)
+        .map(id=>{
+          const sr=routes.find(r=>r.id===sourceId);
+          const tr=routes.find(r=>r.id===id);
+          return {id,d:(sr&&tr)?scenarioV36RoutePairDistance(sr,tr):Infinity};
+        })
+        .filter(x=>Number.isFinite(x.d))
+        .sort((a,b)=>a.d-b.d)
+        .slice(0,6)
+        .map(x=>x.id);
+
+      for(const block of blocks){
+        if(performance.now()>=blockDeadline)break outer;
+
+        for(const targetId of targetIds){
+          if(performance.now()>=blockDeadline)break outer;
+          stats.blockMovesAttempted++;
+
+          const target=routes.find(r=>r.id===targetId);
+          if(!target)continue;
+
+          const eligible=block.ids.every(id=>{
+            const s=stops.find(x=>x.id===id);
+            const liveTarget=routes.find(r=>r.id===targetId);
+            return s&&liveTarget&&scenarioStopCanChangeRoute(s,opts)&&scenarioCanTargetRoute(s,liveTarget,opts);
+          });
+          if(!eligible)continue;
+
+          stats.blockMovesEvaluated++;
+          const res=scenarioV36TryBlockRelocation(sourceId,targetId,block,opts);
+
+          if(res?.accepted){
+            stats.blockMovesAccepted++;
+            stats.stopsMovedInBlocks+=block.ids.length;
+            stats.milesSaved+=Math.max(0,res.milesSaved||0);
+            stats.routeSequenceMoves+=res.seqMoves||0;
+            stats.dispatchChanges+=res.dispatchChanges||0;
+            acceptedOne=true;
+            break outer; // restart all rankings from the improved network
+          }
+        }
+      }
+    }
+
+    if(!acceptedOne)break;
+  }
+
+  stats.budgetExhausted=performance.now()>=blockDeadline;
+  stats.runtimeSeconds=(performance.now()-started)/1000;
+  return stats;
+}
+
+// Replace only the post-build portion of v36's wrapper. The scratch builder,
+// runtime fix, V34 freight recovery, and existing incremental optimizer remain.
+scenarioV36PostBuildOptimize=scenarioV361PostBuildOptimize;
+
+// Replace the report extension so users can verify the block search ACTUALLY ran.
+const scenarioV361NetworkHtmlBase=scenarioV36NetworkHtmlBase;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV361NetworkHtmlBase(r);
+  const p=r?.removed?.networkAnalysis?.postBuildOptimization;
+  if(!p)return html;
+
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(p.blockMovesEvaluated||0)>0?'rgba(62,207,142,.55)':'rgba(245,158,11,.65)'};">
+    <h3>v36.1 Post-Build Global Optimization</h3>
+    <div class="scenario-help">
+      The post-build block optimizer now has a dedicated search budget. The previous v36 repeated the V34 route-level mileage polish first, consuming the entire 12-second budget before any 2–3 stop territory move could be evaluated.
+    </div>
+    <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));">
+      <div class="scenario-kpi"><div class="v">${p.blockMovesAccepted||0}</div><div class="l">Block Moves Accepted</div></div>
+      <div class="scenario-kpi"><div class="v">${p.blockMovesEvaluated||0}</div><div class="l">Eligible Blocks Evaluated</div></div>
+      <div class="scenario-kpi"><div class="v">${scenarioFmt(p.milesSaved||0,1)}</div><div class="l">Modeled Miles Removed</div></div>
+      <div class="scenario-kpi"><div class="v">${scenarioFmt(p.runtimeSeconds||0,1)}s</div><div class="l">Post-Build Runtime</div></div>
+    </div>
+    <div class="scenario-note">
+      <strong>Block attempts:</strong> ${(p.blockMovesAttempted||0).toLocaleString()} ·
+      <strong>Stops re-territoried:</strong> ${p.stopsMovedInBlocks||0} ·
+      <strong>Route sequence improvements:</strong> ${p.routeSequenceMoves||0} ·
+      <strong>Dispatch changes:</strong> ${p.dispatchChanges||0} ·
+      <strong>Passes:</strong> ${p.passes||0} ·
+      <strong>Search budget exhausted:</strong> ${p.budgetExhausted?'Yes':'No'}.
+      ${(p.blockMovesEvaluated||0)===0?'<br><strong style="color:var(--warning)">No eligible block reached evaluation. If this appears with Route Lock removed, the remaining blocker is eligibility/territory logic rather than runtime budget.</strong>':''}
+    </div>
+  </div>`;
+};
+</script>
+
 </body>
 </html>
