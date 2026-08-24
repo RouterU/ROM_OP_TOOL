@@ -12563,5 +12563,97 @@ scenarioV27NetworkAnalysisHtml=function(r){
 };
 </script>
 
+
+<script>
+// v37.1 — Depot StopType export fix.
+// Export convention:
+//   first/origin depot = 0
+//   final/return depot = 1
+//   customer = 3
+// This normalization is applied at spreadsheet serialization and therefore
+// keeps the Output File data consistent with the TXT export source data.
+
+function routeERV371NormalizeAOAStopTypes(data){
+  if(!Array.isArray(data)||data.length<2||!Array.isArray(data[0])) return data;
+  const headers=data[0].map(v=>String(v??'').trim().toLowerCase());
+  const st=headers.indexOf('stoptype');
+  const lt=headers.indexOf('locationtype');
+  const rt=headers.indexOf('route');
+  if(st<0||lt<0) return data;
+
+  const depotsByRoute=new Map();
+  for(let i=1;i<data.length;i++){
+    const row=data[i];
+    if(!Array.isArray(row)) continue;
+    const type=String(row[lt]??'').trim().toUpperCase();
+    if(type==='CUSTOMER') row[st]='3';
+    if(type==='DEPOT'){
+      const key=rt>=0?String(row[rt]??'').trim():'';
+      if(!depotsByRoute.has(key)) depotsByRoute.set(key,[]);
+      depotsByRoute.get(key).push(i);
+    }
+  }
+  for(const indexes of depotsByRoute.values()){
+    indexes.forEach((idx,pos)=>{
+      data[idx][st]=(indexes.length>1 && pos===indexes.length-1)?'1':'0';
+    });
+  }
+  return data;
+}
+
+function routeERV371NormalizeObjectStopTypes(rows){
+  if(!Array.isArray(rows)||!rows.length) return rows;
+  const get=(r,names)=>{
+    for(const n of names) if(Object.prototype.hasOwnProperty.call(r,n)) return r[n];
+    return '';
+  };
+  const setStop=(r,v)=>{
+    for(const n of ['stoptype','stopType','StopType','STOPTYPE']){
+      if(Object.prototype.hasOwnProperty.call(r,n)){ r[n]=v; return; }
+    }
+    r.stoptype=v;
+  };
+  const depotsByRoute=new Map();
+  rows.forEach((r,i)=>{
+    if(!r||typeof r!=='object') return;
+    const type=String(get(r,['locationType','LocationType','LOCATIONTYPE','locationtype'])).trim().toUpperCase();
+    if(type==='CUSTOMER') setStop(r,'3');
+    if(type==='DEPOT'){
+      const key=String(get(r,['Route','route','ROUTE','RouteKey','routeKey','routekey'])).trim();
+      if(!depotsByRoute.has(key)) depotsByRoute.set(key,[]);
+      depotsByRoute.get(key).push(i);
+    }
+  });
+  for(const indexes of depotsByRoute.values()){
+    indexes.forEach((idx,pos)=>setStop(rows[idx],(indexes.length>1&&pos===indexes.length-1)?'1':'0'));
+  }
+  return rows;
+}
+
+(function(){
+  if(typeof XLSX==='undefined'||!XLSX.utils) return;
+
+  const j2s=XLSX.utils.json_to_sheet;
+  if(typeof j2s==='function'&&!j2s.__routeERV371){
+    const wrapped=function(data,...args){
+      if(Array.isArray(data)) routeERV371NormalizeObjectStopTypes(data);
+      return j2s.call(this,data,...args);
+    };
+    wrapped.__routeERV371=true;
+    XLSX.utils.json_to_sheet=wrapped;
+  }
+
+  const a2s=XLSX.utils.aoa_to_sheet;
+  if(typeof a2s==='function'&&!a2s.__routeERV371){
+    const wrapped=function(data,...args){
+      routeERV371NormalizeAOAStopTypes(data);
+      return a2s.call(this,data,...args);
+    };
+    wrapped.__routeERV371=true;
+    XLSX.utils.aoa_to_sheet=wrapped;
+  }
+})();
+</script>
+
 </body>
 </html>
