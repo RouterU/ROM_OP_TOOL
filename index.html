@@ -438,12 +438,13 @@ body{background:var(--bg0);color:var(--text1);}
   mix-blend-mode: plus-lighter;
 }
 
-/* v35.9 — Key-free dark basemap styling.
+/* v35.9a — Key-free dark basemap styling (slightly lighter).
    The dark layer now uses standard OpenStreetMap raster tiles and applies
    a browser-side dark treatment, so RouteER keeps its dark-map appearance
    without depending on a CARTO API key. Satellite tiles are unaffected. */
-.leaflet-container img.routeer-dark-basemap{
-  filter:invert(100%) hue-rotate(180deg) brightness(.72) contrast(1.12) saturate(.60);
+.leaflet-container .routeer-dark-basemap img.leaflet-tile,
+.leaflet-container .routeer-dark-basemap .leaflet-tile{
+  filter:invert(100%) hue-rotate(180deg) brightness(.78) contrast(1.12) saturate(.60);
 }
 </style>
 
