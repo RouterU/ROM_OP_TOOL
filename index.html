@@ -1141,10 +1141,19 @@ window.onbeforeunload = endingSessionWarning;
 // ============================================================
 // INIT
 // ============================================================
+function localDateISO(date){
+  return date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0');
+}
+function nextBusinessDateISO(fromDate=new Date()){
+  const d=new Date(fromDate.getFullYear(),fromDate.getMonth(),fromDate.getDate());
+  do{ d.setDate(d.getDate()+1); }while(d.getDay()===0||d.getDay()===6);
+  return localDateISO(d);
+}
+
 window.addEventListener('DOMContentLoaded',()=>{
-  document.getElementById('route-date').value=new Date().toISOString().slice(0,10);
+  document.getElementById('route-date').value=localDateISO(new Date());
   const importRouteDateEl=document.getElementById('import-route-date');
-  if(importRouteDateEl) importRouteDateEl.value=document.getElementById('route-date').value;
+  if(importRouteDateEl) importRouteDateEl.value=nextBusinessDateISO();
   const importRegionCodeEl=document.getElementById('import-region-code');
   if(importRegionCodeEl) importRegionCodeEl.value=sessionRegionCode;
   map=L.map('map',{zoomControl:true}).setView([39.5,-98.35],4);
@@ -2481,6 +2490,23 @@ function openStopDetail(stopId){
     ${detailTextArea('ed-s-comment','Comment',s.comment)}
     ${s.sourceType==='route-data'?renderScenarioRouteDataDetailHtml(s):renderStopOrdersHtml(s)}
   </div>`;
+
+  // Protect customer order data imported through All Templates / Orders Only.
+  // Only routing placement controls may be changed by a router. Route Data sessions
+  // and manually-created stops retain their existing edit behavior.
+  const lockImportedOrderDetails=s.sourceType!=='route-data' && s.sourceType!=='depot-clone' && (s.orderDetailsLocked===true||s.isConsolidated===true||Array.isArray(s.orders));
+  if(lockImportedOrderDetails){
+    const allowedIds=new Set(['ed-s-routeId','ed-s-seq','ed-s-lockStart','ed-s-lockFinal']);
+    const body=document.getElementById('stop-detail-body');
+    body?.querySelectorAll('input,select,textarea').forEach(ctrl=>{
+      if(!allowedIds.has(ctrl.id)){
+        ctrl.disabled=true;
+        ctrl.title='Imported customer order detail — read only';
+        ctrl.style.opacity='.72';
+        ctrl.style.cursor='not-allowed';
+      }
+    });
+  }
   document.getElementById('stop-detail-modal').style.display='flex';
 }
 function saveStopDetail(){
@@ -4333,7 +4359,11 @@ function openImport(){
   pendingWB=null;
   document.getElementById('file-in').value='';
   const importRouteDateEl=document.getElementById('import-route-date');
-  if(importRouteDateEl) importRouteDateEl.value=document.getElementById('route-date')?.value||new Date().toISOString().slice(0,10);
+  if(importRouteDateEl){
+    // All Templates routes are normally planned one business day ahead.
+    // Friday advances to Monday; weekends also advance to Monday.
+    importRouteDateEl.value=importMode==='all'?nextBusinessDateISO():(document.getElementById('route-date')?.value||localDateISO(new Date()));
+  }
   const importRegionCodeEl=document.getElementById('import-region-code');
   if(importRegionCodeEl) importRegionCodeEl.value=sessionRegionCode||importRegionCodeEl.value||'';
   setImportMode(['stops','routedata'].includes(importMode)?importMode:'all');
@@ -4785,15 +4815,22 @@ function orderLabel(stop){
 }
 function cutIdColor(value){
   const norm=normalizeCutId(value);
-  const match=norm.match(/(\d+)/);
-  const palette=['#4f8cff','#3ecf8e','#f59e0b','#ef4444','#a78bfa','#fb923c','#38bdf8','#f472b6','#34d399'];
-  if(match){
-    const idx=(parseInt(match[1],10)-1)%palette.length;
-    return palette[idx>=0?idx:0];
-  }
+  const cutColors={
+    CUTID_1:'#8b8f97', // Grey
+    CUTID_2:'#3b82f6', // Blue
+    CUTID_3:'#8b5a2b', // Brown
+    CUTID_4:'#22c55e', // Green
+    CUTID_5:'#f97316', // Orange
+    CUTID_6:'#ec4899', // Pink
+    CUTID_7:'#a855f7', // Purple
+    CUTID_8:'#20c9c3', // Turquoise
+    CUTID_9:'#facc15'  // Yellow
+  };
+  if(cutColors[norm])return cutColors[norm];
+  const fallback=Object.values(cutColors);
   let hash=0;
   for(let i=0;i<norm.length;i++)hash=(hash*31+norm.charCodeAt(i))>>>0;
-  return palette[hash%palette.length];
+  return fallback[hash%fallback.length];
 }
 function cutIdValuesForStop(stop){
   const values=[];
@@ -4914,6 +4951,9 @@ function buildConsolidatedStopFromOrders(orders, existing){
     routeId:existing?existing.routeId:null,
     seq:existing?existing.seq:0,
     isConsolidated:true,
+    // All Templates / Orders Only customer-order fields are protected from manual edits.
+    // Routing controls remain editable in the stop detail modal.
+    orderDetailsLocked:true,
     orders:orders,
     orderNumber:orders.map(o=>o.orderNumber).filter(Boolean).join(', '),
     orderNumbers:orders.map(o=>o.orderNumber).filter(Boolean),
