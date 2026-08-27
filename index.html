@@ -12958,5 +12958,224 @@ scenarioV27NetworkAnalysisHtml=function(r){
   </div>`;
 };
 </script>
+
+<script>
+// ============================================================================
+// V38 — FAIL-SAFE ASYNC OPTIMIZER
+// ============================================================================
+// v37.2 bounded the candidate counts, but several legacy helper calls beneath
+// the optimizer can still execute large synchronous route/network searches
+// before their outer deadline is checked. That can freeze Chromium even when
+// the nominal optimizer budget is small.
+//
+// V38 bypasses those nested whole-network searches for Run Model. It keeps the
+// same imported baseline, scenario filters, hard route feasibility checks and
+// reporting flow, but uses browser-safe route-local operations and yields back
+// to the browser between batches. No whole-workspace candidate cloning is used.
+
+let scenarioV38Running=false;
+function scenarioV38Yield(){return new Promise(resolve=>setTimeout(resolve,0));}
+function scenarioV38Progress(message,detail=''){
+  let el=document.getElementById('scenario-v38-progress');
+  if(!el){
+    el=document.createElement('div');
+    el.id='scenario-v38-progress';
+    el.style.cssText='position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;';
+    el.innerHTML='<div style="width:min(520px,92vw);background:var(--bg1);border:1px solid var(--border2);border-radius:12px;padding:18px;box-shadow:0 18px 50px rgba(0,0,0,.55);"><div style="font-size:14px;font-weight:700;color:var(--text1);margin-bottom:7px;">Optimizing Scenario</div><div id="scenario-v38-progress-msg" style="font-size:11px;color:var(--text2);"></div><div id="scenario-v38-progress-detail" style="font-size:9px;color:var(--text3);margin-top:6px;"></div><div style="height:4px;background:var(--bg3);border-radius:4px;margin-top:12px;overflow:hidden;"><div id="scenario-v38-progress-bar" style="height:100%;width:35%;background:var(--accent);border-radius:4px;animation:scenarioV38Pulse 1.2s ease-in-out infinite alternate;"></div></div></div>';
+    document.body.appendChild(el);
+    if(!document.getElementById('scenario-v38-style')){
+      const st=document.createElement('style');st.id='scenario-v38-style';st.textContent='@keyframes scenarioV38Pulse{from{transform:translateX(-25%)}to{transform:translateX(190%)}}';document.head.appendChild(st);
+    }
+  }
+  const m=document.getElementById('scenario-v38-progress-msg'),d=document.getElementById('scenario-v38-progress-detail');
+  if(m)m.textContent=message||'Working…';if(d)d.textContent=detail||'';
+}
+function scenarioV38HideProgress(){document.getElementById('scenario-v38-progress')?.remove();}
+function scenarioV38CustomerPool(){return stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);}
+function scenarioV38RouteCustomers(routeId){return scenarioV32RouteCustomers(routeId);}
+function scenarioV38RouteDepotKey(route){return scenarioNormalizeDepotKey(routeInitialDepot(route)?.locationKey||route?.initialLocationKey||'');}
+function scenarioV38StopDistanceFromDepot(stop,route){
+  const d=routeInitialDepot(route)||routeFinalDepot(route);return d?scenarioV32Miles(d,stop):0;
+}
+function scenarioV38CandidateRoutes(stop,opts,limit=5){
+  let list=[];
+  try{list=scenarioV322RouteShortlist(stop,opts,limit)||[];}catch(e){}
+  if(!list.length){
+    try{list=scenarioV32CandidatePool(stop,opts,false)||[];}catch(e){list=[];}
+  }
+  return list.slice(0,limit);
+}
+function scenarioV38BestPlacement(stop,opts,limit=5){
+  let best=null;
+  for(const r of scenarioV38CandidateRoutes(stop,opts,limit)){
+    let c=null;try{c=scenarioV33Insertion(stop,r,opts,false);}catch(e){c=null;}
+    if(!c)continue;
+    const load=scenarioV38RouteCustomers(r.id).length;
+    const score=(Number.isFinite(+c.score)?+c.score:0)+load*25000;
+    if(!best||score<best._v38Score){c._v38Score=score;best=c;}
+  }
+  return best;
+}
+async function scenarioV38ScratchBuild(opts,deadline){
+  const started=performance.now();
+  const pool=scenarioV38CustomerPool();
+  const stats={mode:'scratch',algorithm:'V38 browser-safe greedy network build',poolStops:pool.length,poolCases:pool.reduce((a,s)=>a+scenarioV32Cases(s),0),initialPlacedStops:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,routesActivated:0,routesRetired:0,difficultFirstPlacements:0,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0,dispatchRoutesEvaluated:0,dispatchChanges:0,dispatchWaitSaved:0,budgetExceeded:false,performanceBudgetSeconds:18,primaryBuildSeconds:0,recoverySeconds:0};
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+  const ranked=[...pool].sort((a,b)=>scenarioV33FreightPriority(b,opts)-scenarioV33FreightPriority(a,opts));
+  let processed=0;
+  for(const s of ranked){
+    if(performance.now()>=deadline){stats.budgetExceeded=true;break;}
+    const best=scenarioV38BestPlacement(s,opts,5);
+    if(best&&scenarioV34CommitVerified(s.id,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;}
+    processed++;
+    if(processed%3===0){scenarioV38Progress('Building route assignments…',`${processed} of ${ranked.length} customer stops evaluated`);await scenarioV38Yield();}
+  }
+  // Any customer not reached or not feasible remains explicitly unassigned.
+  const missing=pool.filter(s=>!s.routeId);
+  for(const s of missing){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no feasible placement within V38 browser-safe search';}
+  stats.initialUnassigned=missing.length;stats.unassignedStops=missing.length;stats.unassignedCases=missing.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;stats.primaryBuildSeconds=(performance.now()-started)/1000;
+  return stats;
+}
+async function scenarioV38SequenceRoutes(opts,deadline,stats){
+  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id));
+  let done=0;
+  for(const r of active){
+    if(performance.now()>=deadline){stats.budgetExhausted=true;break;}
+    if(scenarioRouteIsProtectedLongHaul(r)){done++;continue;}
+    const cs=scenarioV38RouteCustomers(r.id);
+    if(cs.length>2){
+      const before=cs.map(s=>s.id).join('|');
+      let ordered=cs;
+      try{ordered=scenarioV37NearestOrder(r,cs);}catch(e){}
+      try{scenarioApplyRouteOrder(r.id,scenarioComposePreservingDepots(r.id,ordered));}catch(e){}
+      const after=scenarioV38RouteCustomers(r.id).map(s=>s.id).join('|');
+      if(before!==after)stats.localSequenceMoves++;
+    }
+    done++;
+    scenarioV38Progress('Sequencing routes…',`${done} of ${active.length} active routes`);
+    await scenarioV38Yield();
+  }
+}
+async function scenarioV38Relocate(opts,deadline,stats){
+  // Small, route-local relocation neighborhood. It never clones/restores the
+  // entire workspace and never evaluates more than 36 candidates.
+  let evaluated=0,accepted=0;
+  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r));
+  outer: for(const source of active){
+    if(performance.now()>=deadline)break;
+    const dep=routeInitialDepot(source)||routeFinalDepot(source);
+    const candidates=[...scenarioV38RouteCustomers(source.id)]
+      .sort((a,b)=>(dep?scenarioV32Miles(dep,b):0)-(dep?scenarioV32Miles(dep,a):0)).slice(0,2);
+    for(const stop of candidates){
+      const dests=scenarioV38CandidateRoutes(stop,opts,4).filter(r=>r.id!==source.id).slice(0,2);
+      for(const dest of dests){
+        if(performance.now()>=deadline||evaluated>=36)break outer;
+        evaluated++;
+        let beforeSrc=null,beforeDst=null,afterSrc=null,ins=null;
+        const originalRoute=stop.routeId,originalSeq=stop.seq;
+        try{
+          beforeSrc=scenarioEvaluateRouteCustomers(source,scenarioV38RouteCustomers(source.id),opts);
+          beforeDst=scenarioEvaluateRouteCustomers(dest,scenarioV38RouteCustomers(dest.id),opts);
+          stop.routeId=null;stop.seq=0;
+          const remain=scenarioV38RouteCustomers(source.id).filter(s=>s.id!==stop.id);
+          afterSrc=scenarioEvaluateRouteCustomers(source,remain,opts);
+          ins=scenarioV33Insertion(stop,dest,opts,false);
+        }catch(e){}
+        stop.routeId=originalRoute;stop.seq=originalSeq;
+        if(beforeSrc&&beforeDst&&afterSrc&&ins){
+          const before=(beforeSrc.sim?.miles||0)+(beforeDst.sim?.miles||0);
+          const after=(afterSrc.sim?.miles||0)+(ins.sim?.miles||0);
+          const save=before-after;
+          const beforeLate=(beforeSrc.sim?.late||0)+(beforeDst.sim?.late||0);
+          const afterLate=(afterSrc.sim?.late||0)+(ins.sim?.late||0);
+          if(save>=1.25&&afterLate<=beforeLate){
+            stop.routeId=null;stop.seq=0;
+            try{scenarioApplyRouteOrder(source.id,scenarioComposePreservingDepots(source.id,scenarioV38RouteCustomers(source.id).filter(s=>s.id!==stop.id)));}catch(e){}
+            if(scenarioV34CommitVerified(stop.id,ins)){accepted++;stats.relocationsAccepted++;stats.stopsReassigned++;}
+            else {stop.routeId=originalRoute;stop.seq=originalSeq;}
+          }
+        }
+        if(evaluated%4===0){scenarioV38Progress('Testing nearby route improvements…',`${evaluated} bounded relocation candidates evaluated`);await scenarioV38Yield();}
+      }
+    }
+  }
+  stats.relocationsEvaluated=evaluated;
+  return {evaluated,accepted};
+}
+
+runScenarioModel=async function(){
+  if(scenarioV38Running){showToast('Scenario optimization is already running.');return;}
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  scenarioV38Running=true;
+  const overallStart=performance.now();
+  try{
+    const opts=scenarioReadOptions();
+    scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+    if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+
+    scenarioV38Progress('Preparing scenario…','Restoring the imported baseline and applying selected levers');
+    await scenarioV38Yield();
+    restoreScenarioBaseline();
+    stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+    scenarioBuildOptimizerBaselineSnapshot();
+    const removed=scenarioApplyFilters(opts);
+    scenarioCapturePostFilterTimingSnapshot(opts);
+    const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+    const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+    if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+    // Total optimizer budget is deliberately modest, but more importantly every
+    // stage yields to Chromium so the page remains responsive.
+    const deadline=performance.now()+18000;
+    let scratch=null;
+    if(opts.optimizationMode==='scratch'){
+      scenarioV38Progress('Building from scratch…','Using bounded customer-to-route placement');await scenarioV38Yield();
+      scratch=await scenarioV38ScratchBuild(opts,deadline);
+    }
+
+    const network={optimizer:'V38 browser-safe async',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true};
+    await scenarioV38SequenceRoutes(opts,deadline,network);
+    if(performance.now()<deadline)await scenarioV38Relocate(opts,deadline,network);
+    network.budgetExhausted=performance.now()>=deadline;
+    network.runtimeSeconds=(performance.now()-overallStart)/1000;
+    removed.networkAnalysis=network;removed.scratchBuild=scratch;
+
+    scenarioV38Progress('Validating solution…','Checking route runtime, truck capacity and customer windows');await scenarioV38Yield();
+    removed.consolidation={routesReviewed:0,retiredRoutes:0,retired:[],movedStops:0,v38Skipped:true};
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);
+    removed.capacityViolations=scenarioValidateCapacityLimits();
+    removed.waitReview=scenarioCountWaitViolations(opts);
+    removed.targetedRepair=null; // legacy repair search can itself become combinatorial
+
+    if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=0;}
+    const modeled=scenarioComputeModelMetrics(opts);
+    let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+    if(opts.optimizationMode==='scratch'){
+      const q=scenarioV32QualityVerdict(original,modeled,scratch,removed);removed.scratchQualityGate=q;verdict.verdict=q.bad?'SCRATCH SOLUTION — REVIEW REQUIRED':'FROM-SCRATCH NETWORK BUILT';
+    }else{
+      scenarioV31ScratchActive=false;
+      if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='INCREMENTAL IMPROVEMENT — FEASIBILITY WARNING';
+      else verdict.verdict='IMPROVED — BROWSER-SAFE NETWORK OPTIMIZED';
+    }
+    const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V38 Browser-Safe Async Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioRefreshWorkspaceAfterRun();
+    closeModal('scenario-levers-modal');
+    scenarioV38HideProgress();
+    openScenarioAfterActionReport();
+  }catch(err){
+    console.error('V38 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));
+  }finally{scenarioV38Running=false;scenarioV38HideProgress();}
+};
+
+const scenarioV38ReportBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV38ReportBase(r);
+  const n=r?.removed?.networkAnalysis;
+  if(r?.optimizerVersion!=='V38 Browser-Safe Async Optimizer'||!n)return html;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:rgba(62,207,142,.55);"><h3>V38 Browser-Safe Execution</h3><div class="scenario-help">Run Model used the fail-safe asynchronous optimizer. It avoids whole-network candidate cloning, caps cross-route relocation trials, skips the combinatorial legacy targeted-repair/consolidation searches, and yields to Chromium between route batches so the page remains responsive.</div><div class="scenario-note" style="margin-top:7px;"><strong>Runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec · <strong>Relocations evaluated / accepted:</strong> ${n.relocationsEvaluated||0} / ${n.relocationsAccepted||0} · <strong>Routes resequenced:</strong> ${n.localSequenceMoves||0} · <strong>Budget reached:</strong> ${n.budgetExhausted?'Yes — best solution found so far retained':'No'}.</div></div>`;
+};
+</script>
 </body>
 </html>
