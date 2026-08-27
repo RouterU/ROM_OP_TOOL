@@ -12706,5 +12706,257 @@ function routeERV371NormalizeObjectStopTypes(rows){
 })();
 </script>
 
+
+
+<script>
+// ============================================================
+// V37.2 — OPTIMIZER PERFORMANCE / BROWSER STALL GUARDRAIL
+// ============================================================
+// The v37 pairwise rebuild could synchronously evaluate hundreds of whole-
+// network candidate states. Each candidate cloned the full workspace, ran two
+// deep route optimizations, recomputed full-network KPIs, and then restored the
+// full workspace. On larger days this can monopolize Chromium's main thread and
+// trigger "page unresponsive" / browser timeout behavior.
+//
+// This replacement keeps the same feasibility/service gates, but bounds the
+// expensive neighborhoods and uses a light partition trial. Deep route polish
+// runs only after a candidate has actually been selected.
+
+function scenarioV372DeadlineOk(deadline){
+  return !deadline || performance.now() < deadline;
+}
+
+function scenarioV372ApplyPartitionFast(routeAId,routeBId,g1Ids,g2Ids,opts){
+  const ra=routes.find(r=>r.id===routeAId), rb=routes.find(r=>r.id===routeBId);
+  if(!ra||!rb)return false;
+  const g1=g1Ids.map(id=>stops.find(s=>s.id===id)).filter(Boolean);
+  const g2=g2Ids.map(id=>stops.find(s=>s.id===id)).filter(Boolean);
+  if(!scenarioV37PairEligibility(ra,g1,opts)||!scenarioV37PairEligibility(rb,g2,opts))return false;
+
+  g1.forEach(s=>{s.routeId=ra.id;});
+  g2.forEach(s=>{s.routeId=rb.id;});
+  scenarioApplyRouteOrder(ra.id,scenarioComposePreservingDepots(ra.id,scenarioV37NearestOrder(ra,g1)));
+  scenarioApplyRouteOrder(rb.id,scenarioComposePreservingDepots(rb.id,scenarioV37NearestOrder(rb,g2)));
+
+  const ea=scenarioEvaluateRouteCustomers(ra,scenarioV32RouteCustomers(ra.id),opts);
+  const eb=scenarioEvaluateRouteCustomers(rb,scenarioV32RouteCustomers(rb.id),opts);
+  if(!ea||!eb)return false;
+  if(!scenarioRuntimeOk(ea.sim,opts,true)||!scenarioRuntimeOk(eb.sim,opts,true))return false;
+  const ca=scenarioCapacityStatus(ra), cb=scenarioCapacityStatus(rb);
+  if((ca.known&&!ca.ok)||(cb.known&&!cb.ok))return false;
+  return true;
+}
+
+function scenarioV372FastPairwise(opts,deadline){
+  const stats={pairsReviewed:0,partitionsEvaluated:0,partitionsFeasible:0,pairRebuildsAccepted:0,stopsReTerritoried:0,milesSaved:0,sequenceMoves:0,dispatchChanges:0,passes:0,runtimeSeconds:0,budgetExhausted:false,performanceGuardrail:true};
+  const started=performance.now();
+  if(!scenarioV372DeadlineOk(deadline))return stats;
+
+  const beforePass=scenarioV37LiveMetrics(opts);
+  if(!beforePass)return stats;
+  let best=null, evalCount=0;
+  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+  const pairs=[];
+  for(let i=0;i<active.length;i++){
+    for(let j=i+1;j<active.length;j++){
+      if(!scenarioV372DeadlineOk(deadline))break;
+      if(!scenarioV37CommonDepot(active[i],active[j]))continue;
+      const d=scenarioV36RoutePairDistance(active[i],active[j]);
+      if(Number.isFinite(d))pairs.push({a:active[i].id,b:active[j].id,d});
+    }
+    if(!scenarioV372DeadlineOk(deadline))break;
+  }
+  pairs.sort((x,y)=>x.d-y.d);
+  stats.passes=1;
+
+  pairLoop:
+  for(const pair of pairs.slice(0,8)){
+    if(!scenarioV372DeadlineOk(deadline)||evalCount>=16)break;
+    stats.pairsReviewed++;
+    const a=routes.find(r=>r.id===pair.a),b=routes.find(r=>r.id===pair.b);
+    if(!a||!b)continue;
+    const customers=[...scenarioV32RouteCustomers(a.id),...scenarioV32RouteCustomers(b.id)];
+    if(customers.length<5||customers.length>40)continue;
+    const originalRouteById=new Map(customers.map(s=>[s.id,s.routeId]));
+    const partitions=scenarioV37CandidatePartitions(a,b,customers).slice(0,4);
+
+    for(const part of partitions){
+      if(!scenarioV372DeadlineOk(deadline)||evalCount>=16)break pairLoop;
+      stats.partitionsEvaluated++;
+      for(const orientation of [0,1]){
+        if(!scenarioV372DeadlineOk(deadline)||evalCount++>=16)break pairLoop;
+        const snap=scenarioSnapshotWorkingState();
+        const g1=(orientation?part.g2:part.g1).map(s=>s.id);
+        const g2=(orientation?part.g1:part.g2).map(s=>s.id);
+        if(!scenarioV372ApplyPartitionFast(pair.a,pair.b,g1,g2,opts)){
+          scenarioRestoreWorkingState(snap);continue;
+        }
+        stats.partitionsFeasible++;
+        const after=scenarioV37LiveMetrics(opts);
+        const milesSaved=(beforePass?.miles||0)-(after?.miles||0);
+        if(scenarioV37AcceptPair(beforePass,after,opts)){
+          const changed=customers.filter(s=>{
+            const live=stops.find(x=>x.id===s.id);
+            return live&&live.routeId!==originalRouteById.get(s.id);
+          }).length;
+          if(!best||milesSaved>best.milesSaved){
+            best={state:scenarioSnapshotWorkingState(),milesSaved,changed,pair};
+          }
+        }
+        scenarioRestoreWorkingState(snap);
+      }
+    }
+  }
+
+  if(best&&scenarioV372DeadlineOk(deadline)){
+    scenarioRestoreWorkingState(best.state);
+    // Deep polish only the winning pair, instead of every trial candidate.
+    for(const id of [best.pair.a,best.pair.b]){
+      if(!scenarioV372DeadlineOk(deadline))break;
+      const r=routes.find(x=>x.id===id);
+      if(!r)continue;
+      try{stats.sequenceMoves+=(scenarioLocalImproveRoute(id,opts).moves||0);}catch(e){}
+      if(opts.optDispatch&&scenarioV372DeadlineOk(deadline)){
+        try{
+          const old=scenarioCurrentRouteSignature(id).dispatch;
+          scenarioOptimizeDispatch(r,opts);
+          if(scenarioCurrentRouteSignature(id).dispatch!==old)stats.dispatchChanges++;
+        }catch(e){}
+      }
+    }
+    const polished=scenarioV37LiveMetrics(opts);
+    if(scenarioV37AcceptPair(beforePass,polished,opts)){
+      stats.pairRebuildsAccepted=1;
+      stats.stopsReTerritoried=best.changed||0;
+      stats.milesSaved=Math.max(0,(beforePass.miles||0)-(polished?.miles||0));
+    }else{
+      // If deep polish invalidates the trial's benefit, retain the light winning
+      // partition only when it still passes the original acceptance gate.
+      scenarioRestoreWorkingState(best.state);
+      const light=scenarioV37LiveMetrics(opts);
+      if(scenarioV37AcceptPair(beforePass,light,opts)){
+        stats.pairRebuildsAccepted=1;
+        stats.stopsReTerritoried=best.changed||0;
+        stats.milesSaved=Math.max(0,(beforePass.miles||0)-(light?.miles||0));
+      }
+    }
+  }
+
+  stats.budgetExhausted=!scenarioV372DeadlineOk(deadline)||evalCount>=16;
+  stats.runtimeSeconds=(performance.now()-started)/1000;
+  return stats;
+}
+
+function scenarioV372BoundedIncrementalNetworkOptimize(opts){
+  const stats={relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,acceptedMoves:[],performanceGuardrail:true,budgetExhausted:false,runtimeSeconds:0};
+  const started=performance.now();
+  const deadline=started+9000; // complete the incremental + pairwise layer in ~9s max
+
+  // Local route polish. Check wall clock between routes.
+  for(const r of routes){
+    if(!scenarioV372DeadlineOk(deadline))break;
+    if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))continue;
+    try{stats.localSequenceMoves+=(scenarioLocalImproveRoute(r.id,opts).moves||0);}catch(e){}
+  }
+  if(opts.optDispatch){
+    for(const r of routes){
+      if(!scenarioV372DeadlineOk(deadline))break;
+      if(!scenarioRouteHasCustomerWork(r.id)||scenarioRouteIsProtectedLongHaul(r))continue;
+      try{const before=scenarioCurrentRouteSignature(r.id).dispatch;scenarioOptimizeDispatch(r,opts);if(scenarioCurrentRouteSignature(r.id).dispatch!==before)stats.dispatchChanges++;}catch(e){}
+    }
+  }
+
+  if(opts.removeRouteLock||stops.some(s=>scenarioStopCanChangeRoute(s,opts))){
+    let acceptedGuard=0;
+    while(acceptedGuard++<12&&scenarioV372DeadlineOk(deadline)&&stats.relocationsEvaluated<300){
+      let acceptedThisPass=false;
+      const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+      const sources=active.slice().sort((a,b)=>(scenarioRouteRuntime(a).hours||0)-(scenarioRouteRuntime(b).hours||0)).slice(0,12);
+      sourceLoop:
+      for(const source of sources){
+        if(!scenarioV372DeadlineOk(deadline))break;
+        const movable=scenarioRouteCustomerStops(source.id).filter(s=>scenarioStopCanChangeRoute(s,opts)&&!scenarioIsBackhaulStop(s)).slice(0,12);
+        for(const stop of movable){
+          if(!scenarioV372DeadlineOk(deadline))break sourceLoop;
+          const targets=active.filter(r=>r.id!==source.id&&scenarioCanTargetRoute(stop,r,opts))
+            .map(r=>({r,d:scenarioV27RouteProximityMiles(stop,r)})).filter(x=>Number.isFinite(x.d)).sort((a,b)=>a.d-b.d).slice(0,4);
+          for(const t of targets){
+            if(!scenarioV372DeadlineOk(deadline)||stats.relocationsEvaluated>=300)break sourceLoop;
+            stats.relocationsEvaluated++;
+            const res=scenarioV27TryRelocation(stop,source,t.r,opts);
+            if(res.accepted){
+              stats.relocationsAccepted++;stats.stopsReassigned++;stats.localSequenceMoves+=res.seqMoves||0;stats.dispatchChanges+=res.dispatchChanges||0;
+              stats.acceptedMoves.push({type:'Relocate',customer:stop.customerName||'',locationKey:scenarioLocationKey(stop),from:routeDisplayName(source),to:routeDisplayName(t.r),reason:res.reason});
+              acceptedThisPass=true;break sourceLoop;
+            }
+            if(res.reason==='service')stats.rejectedService++;else if(res.reason==='feasibility')stats.rejectedFeasibility++;else stats.rejectedNoGain++;
+          }
+        }
+      }
+      if(!acceptedThisPass)break;
+    }
+
+    let swapPass=0;
+    while(swapPass++<3&&scenarioV372DeadlineOk(deadline)&&stats.swapsEvaluated<60){
+      let accepted=false;
+      const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r));
+      swapOuter:
+      for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++){
+        if(!scenarioV372DeadlineOk(deadline))break swapOuter;
+        const ra=active[i],rb=active[j];
+        if(scenarioV36RoutePairDistance(ra,rb)>75)continue;
+        const as=scenarioRouteCustomerStops(ra.id).filter(s=>scenarioStopCanChangeRoute(s,opts)&&!scenarioIsBackhaulStop(s)).slice(0,10);
+        const bs=scenarioRouteCustomerStops(rb.id).filter(s=>scenarioStopCanChangeRoute(s,opts)&&!scenarioIsBackhaulStop(s)).slice(0,10);
+        const pairs=[];
+        for(const a of as)for(const b of bs){
+          if(!scenarioCanTargetRoute(a,rb,opts)||!scenarioCanTargetRoute(b,ra,opts))continue;
+          const d=(a.lat&&a.lng&&b.lat&&b.lng)?roadAdjustedMiles(haversine(a.lat,a.lng,b.lat,b.lng)):Infinity;
+          if(d<=30)pairs.push({a,b,d});
+        }
+        pairs.sort((x,y)=>x.d-y.d);
+        for(const p of pairs.slice(0,3)){
+          if(!scenarioV372DeadlineOk(deadline)||stats.swapsEvaluated>=60)break swapOuter;
+          stats.swapsEvaluated++;
+          const res=scenarioV27TrySwap(p.a,p.b,ra,rb,opts);
+          if(res.accepted){
+            stats.swapsAccepted++;stats.stopsReassigned+=2;stats.localSequenceMoves+=res.seqMoves||0;stats.dispatchChanges+=res.dispatchChanges||0;
+            stats.acceptedMoves.push({type:'Swap',customer:(p.a.customerName||'')+' ↔ '+(p.b.customerName||''),locationKey:scenarioLocationKey(p.a)+' ↔ '+scenarioLocationKey(p.b),from:routeDisplayName(ra),to:routeDisplayName(rb),reason:res.reason});
+            accepted=true;break swapOuter;
+          }
+          if(res.reason==='service')stats.rejectedService++;else if(res.reason==='feasibility')stats.rejectedFeasibility++;else stats.rejectedNoGain++;
+        }
+      }
+      if(!accepted)break;
+    }
+  }
+
+  // Use only the remaining budget for the global pair neighborhood.
+  const pair=scenarioV372FastPairwise(opts,deadline);
+  stats.v37Pairwise=pair;
+  stats.stopsReassigned+=(pair.stopsReTerritoried||0);
+  stats.localSequenceMoves+=(pair.sequenceMoves||0);
+  stats.dispatchChanges+=(pair.dispatchChanges||0);
+  stats.budgetExhausted=!scenarioV372DeadlineOk(deadline)||pair.budgetExhausted;
+  stats.runtimeSeconds=(performance.now()-started)/1000;
+  return stats;
+}
+
+// Final optimizer override. This intentionally bypasses the old captured v27
+// + v37 stack, whose nested whole-network trials were the source of the stall.
+scenarioV27IncrementalNetworkOptimize=scenarioV372BoundedIncrementalNetworkOptimize;
+
+// Surface the guardrail in the existing v37 report without changing report flow.
+const scenarioV372NetworkHtmlBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV372NetworkHtmlBase(r);
+  const n=r?.removed?.networkAnalysis;
+  if(!n?.performanceGuardrail)return html;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${n.budgetExhausted?'rgba(245,158,11,.65)':'rgba(62,207,142,.55)'};">
+    <h3>v37.2 Browser Performance Guardrail</h3>
+    <div class="scenario-help">The incremental optimizer is now wall-clock bounded and the pairwise network search uses lightweight trials. Deep resequencing/dispatch is performed only on the winning pair instead of every candidate.</div>
+    <div class="scenario-note" style="margin-top:7px;"><strong>Optimizer runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec · <strong>Relocations evaluated:</strong> ${(n.relocationsEvaluated||0).toLocaleString()} · <strong>Swaps evaluated:</strong> ${(n.swapsEvaluated||0).toLocaleString()} · <strong>Budget exhausted:</strong> ${n.budgetExhausted?'Yes — best solution found within the browser-safe budget was retained':'No'}.</div>
+  </div>`;
+};
+</script>
 </body>
 </html>
