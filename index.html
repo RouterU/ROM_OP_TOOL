@@ -437,6 +437,14 @@ body{background:var(--bg0);color:var(--text1);}
 .leaflet-container img.leaflet-tile{
   mix-blend-mode: plus-lighter;
 }
+
+/* v35.9 — Key-free dark basemap styling.
+   The dark layer now uses standard OpenStreetMap raster tiles and applies
+   a browser-side dark treatment, so RouteER keeps its dark-map appearance
+   without depending on a CARTO API key. Satellite tiles are unaffected. */
+.leaflet-container img.routeer-dark-basemap{
+  filter:invert(100%) hue-rotate(180deg) brightness(.72) contrast(1.12) saturate(.60);
+}
 </style>
 
 </head>
@@ -1139,9 +1147,11 @@ window.addEventListener('DOMContentLoaded',()=>{
   const importRegionCodeEl=document.getElementById('import-region-code');
   if(importRegionCodeEl) importRegionCodeEl.value=sessionRegionCode;
   map=L.map('map',{zoomControl:true}).setView([39.5,-98.35],4);
-  darkTileLayer=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-    maxZoom:19, subdomains:'abcd',
-    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>'
+  // Key-free dark basemap: standard OpenStreetMap tiles rendered with a dark CSS filter.
+  // This replaces the CARTO dark_all endpoint that now displays API KEY REQUIRED watermarks.
+  darkTileLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19, subdomains:'abc', className:'routeer-dark-basemap',
+    attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   });
   satelliteTileLayer=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
     maxZoom:19,
