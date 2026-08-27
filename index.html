@@ -13177,5 +13177,202 @@ scenarioV27NetworkAnalysisHtml=function(r){
   return html+`<div class="scenario-card" style="margin-top:10px;border-color:rgba(62,207,142,.55);"><h3>V38 Browser-Safe Execution</h3><div class="scenario-help">Run Model used the fail-safe asynchronous optimizer. It avoids whole-network candidate cloning, caps cross-route relocation trials, skips the combinatorial legacy targeted-repair/consolidation searches, and yields to Chromium between route batches so the page remains responsive.</div><div class="scenario-note" style="margin-top:7px;"><strong>Runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec · <strong>Relocations evaluated / accepted:</strong> ${n.relocationsEvaluated||0} / ${n.relocationsAccepted||0} · <strong>Routes resequenced:</strong> ${n.localSequenceMoves||0} · <strong>Budget reached:</strong> ${n.budgetExhausted?'Yes — best solution found so far retained':'No'}.</div></div>`;
 };
 </script>
+
+<script>
+// ============================================================================
+// V39 — FREIGHT-FIRST ASYNC NETWORK BUILDER
+// ============================================================================
+// Primary construction is completion-based, NOT time-budget based. Every
+// customer is processed and, before being declared Unassigned, receives an
+// exhaustive scan of every eligible route. Browser responsiveness is preserved
+// by yielding between small batches. Time budgets are reserved for optional
+// post-build refinement only, after a complete feasible network exists.
+
+let scenarioV39Running=false;
+function scenarioV39Yield(){return new Promise(resolve=>setTimeout(resolve,0));}
+function scenarioV39Progress(phase,detail=''){scenarioV38Progress(phase,detail);}
+function scenarioV39Pool(){return stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.scenarioRemovedReason);}
+function scenarioV39Customers(routeId){return scenarioV32RouteCustomers(routeId);}
+function scenarioV39EligibleRoutes(stop,opts,excludeId=''){
+  let all=[];
+  try{all=scenarioV31CandidateRoutesForStop(stop,opts,null)||[];}catch(e){all=[];}
+  return all.filter(r=>r.id!==excludeId&&!scenarioRouteIsProtectedLongHaul(r));
+}
+function scenarioV39CheapRouteScore(route,stop){
+  try{return scenarioV322RouteCheapScore(route,stop);}catch(e){}
+  const dep=routeInitialDepot(route)||routeFinalDepot(route);
+  return dep?scenarioV32Miles(dep,stop)||0:999999;
+}
+function scenarioV39OrderedCandidates(stop,opts,excludeId=''){
+  const all=scenarioV39EligibleRoutes(stop,opts,excludeId);
+  const active=all.filter(r=>scenarioRouteHasCustomerWork(r.id)).sort((a,b)=>scenarioV39CheapRouteScore(a,stop)-scenarioV39CheapRouteScore(b,stop));
+  const dormant=all.filter(r=>!scenarioRouteHasCustomerWork(r.id)).sort((a,b)=>scenarioV39CheapRouteScore(a,stop)-scenarioV39CheapRouteScore(b,stop));
+  return {all,active,dormant,short:[...active.slice(0,8),...dormant.slice(0,3)]};
+}
+function scenarioV39PlacementScore(cand,route){
+  const load=scenarioV39Customers(route.id).length;
+  const dormant=!scenarioRouteHasCustomerWork(route.id);
+  // Geography/feasibility from the existing insertion score still dominates.
+  // A meaningful activation penalty keeps compatible work on established routes
+  // before opening another resource; a small fill reward improves utilization.
+  const activationPenalty=dormant?2500000:0;
+  const fillReward=Math.min(load,18)*12000;
+  return (Number.isFinite(+cand.score)?+cand.score:0)+activationPenalty-fillReward;
+}
+function scenarioV39FindPlacement(stop,opts,{relaxed=false,excludeId='',exhaustiveOnMiss=true}={}){
+  const groups=scenarioV39OrderedCandidates(stop,opts,excludeId);
+  let best=null,tested=new Set();
+  const test=(route)=>{
+    if(!route||tested.has(route.id))return;
+    tested.add(route.id);
+    let c=null;try{c=scenarioV33Insertion(stop,route,opts,relaxed);}catch(e){c=null;}
+    if(!c)return;
+    const score=scenarioV39PlacementScore(c,route);
+    if(!best||score<best._v39Score){c._v39Score=score;best=c;}
+  };
+  groups.short.forEach(test);
+  if(!best&&exhaustiveOnMiss)groups.all.forEach(test);
+  return {best,tested:tested.size,total:groups.all.length};
+}
+async function scenarioV39Build(opts){
+  const start=performance.now(),pool=scenarioV39Pool();
+  const stats={mode:'scratch',algorithm:'V39 freight-first completion-based async build',poolStops:pool.length,poolCases:pool.reduce((a,s)=>a+scenarioV32Cases(s),0),initialPlacedStops:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,difficultFirstPlacements:0,freightRecoveredCases:0,routesActivated:0,routesRetired:0,primaryBuildSeconds:0,recoverySeconds:0,exhaustiveFallbackScans:0,routeTests:0,relaxedRecoveries:0,completionBased:true,budgetExceeded:false};
+  pool.forEach(s=>{s.routeId=null;s.seq=0;s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+  const ranked=[...pool].sort((a,b)=>scenarioV33FreightPriority(b,opts)-scenarioV33FreightPriority(a,opts));
+  let processed=0,unplaced=[];
+  for(const s of ranked){
+    const x=scenarioV39FindPlacement(s,opts,{relaxed:false,exhaustiveOnMiss:true});
+    stats.routeTests+=x.tested;if(x.tested>11)stats.exhaustiveFallbackScans++;
+    if(x.best&&scenarioV34CommitVerified(s.id,x.best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;}
+    else unplaced.push(s);
+    processed++;
+    if(processed%2===0||processed===ranked.length){
+      scenarioV39Progress('Building complete freight network…',`${processed} of ${ranked.length} customer stops processed · ${stats.initialPlacedStops} placed · ${unplaced.length} awaiting recovery`);
+      await scenarioV39Yield();
+    }
+  }
+  stats.primaryBuildSeconds=(performance.now()-start)/1000;stats.initialUnassigned=unplaced.length;
+
+  // Sequence first; this can create runtime/window room for difficult freight.
+  await scenarioV39SequenceAll(opts,null,stats,'Sequencing before freight recovery…');
+
+  const recStart=performance.now();
+  if(unplaced.length){
+    const remain=[];let done=0;
+    unplaced.sort((a,b)=>scenarioV33FreightPriority(b,opts)-scenarioV33FreightPriority(a,opts));
+    for(const s of unplaced){
+      const x=scenarioV39FindPlacement(s,opts,{relaxed:true,exhaustiveOnMiss:true});
+      stats.routeTests+=x.tested;stats.exhaustiveFallbackScans++;
+      if(x.best&&scenarioV34CommitVerified(s.id,x.best)){stats.relaxedRecoveries++;stats.freightRecoveredCases+=scenarioV32Cases(s);}
+      else remain.push(s);
+      done++;
+      scenarioV39Progress('Recovering difficult freight…',`${done} of ${unplaced.length} recovery stops processed · ${remain.length} still without a feasible home`);
+      await scenarioV39Yield();
+    }
+    unplaced=remain;
+  }
+  stats.recoverySeconds=(performance.now()-recStart)/1000;
+  for(const s of unplaced){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: no feasible route after exhaustive V39 normal + relaxed scans';}
+  stats.unassignedStops=unplaced.length;stats.unassignedCases=unplaced.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  return stats;
+}
+async function scenarioV39SequenceAll(opts,deadline,stats,label='Sequencing all active routes…'){
+  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id));let done=0;
+  for(const r of active){
+    if(deadline&&performance.now()>=deadline)break;
+    if(!scenarioRouteIsProtectedLongHaul(r)){
+      const cs=scenarioV39Customers(r.id);
+      if(cs.length>2){
+        const before=cs.map(s=>s.id).join('|');let ordered=cs;
+        try{ordered=scenarioV37NearestOrder(r,cs);}catch(e){}
+        try{scenarioApplyRouteOrder(r.id,scenarioComposePreservingDepots(r.id,ordered));}catch(e){}
+        const after=scenarioV39Customers(r.id).map(s=>s.id).join('|');
+        if(before!==after)stats.localSequenceMoves=(stats.localSequenceMoves||0)+1;
+      }
+    }
+    done++;scenarioV39Progress(label,`${done} of ${active.length} active routes`);await scenarioV39Yield();
+  }
+}
+async function scenarioV39RetireLightRoutes(opts,deadline,stats){
+  // Bounded whole-route retirement AFTER freight completion. Test only the
+  // lightest donor routes and accept only when every customer can be moved.
+  const donors=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r))
+    .sort((a,b)=>scenarioV39Customers(a.id).length-scenarioV39Customers(b.id).length).slice(0,8);
+  let reviewed=0,retired=0;
+  for(const donor of donors){
+    if(performance.now()>=deadline)break;
+    const donorStops=[...scenarioV39Customers(donor.id)];if(!donorStops.length)continue;
+    reviewed++;const snap=scenarioSnapshotWorkingState();let ok=true,moved=0;
+    for(const s0 of donorStops){
+      const s=stops.find(x=>x.id===s0.id);if(!s){ok=false;break;}
+      s.routeId=null;s.seq=0;
+      const x=scenarioV39FindPlacement(s,opts,{relaxed:true,excludeId:donor.id,exhaustiveOnMiss:true});
+      if(!x.best||!scenarioV34CommitVerified(s.id,x.best)){ok=false;break;}moved++;
+      if(performance.now()>=deadline){ok=false;break;}
+    }
+    if(ok&&moved===donorStops.length){
+      retired++;stats.routesRetired=(stats.routesRetired||0)+1;stats.stopsReassigned=(stats.stopsReassigned||0)+moved;
+      stats.retiredRoutes=(stats.retiredRoutes||[]).concat([routeDisplayName(donor)]);
+    }else{scenarioRestoreWorkingState(snap);}
+    scenarioV39Progress('Testing light-route consolidation…',`${reviewed} donor routes reviewed · ${retired} retired`);await scenarioV39Yield();
+  }
+  stats.retirementReviewed=reviewed;return {reviewed,retired};
+}
+function scenarioV39FreightGate(original,modeled){
+  const pct=original?.shippedCases>0?(modeled?.shippedCases||0)/original.shippedCases*100:100;
+  return {pct,failed:pct<99.9};
+}
+
+runScenarioModel=async function(){
+  if(scenarioV39Running){showToast('Scenario optimization is already running.');return;}
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  scenarioV39Running=true;scenarioV38Running=true;const overallStart=performance.now();
+  try{
+    const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+    if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+    scenarioV39Progress('Preparing scenario…','Restoring imported baseline and applying Scenario Levers');await scenarioV39Yield();
+    restoreScenarioBaseline();
+    stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+    scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+    const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+    if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+    let scratch=null;
+    if(opts.optimizationMode==='scratch')scratch=await scenarioV39Build(opts);
+
+    const network={optimizer:'V39 freight-first async',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true};
+    await scenarioV39SequenceAll(opts,null,network,'Finalizing route sequence…');
+
+    // Only now, after full construction, start a bounded efficiency phase.
+    const refineDeadline=performance.now()+30000;
+    if(scratch&&scratch.unassignedStops===0){await scenarioV39RetireLightRoutes(opts,refineDeadline,network);await scenarioV39SequenceAll(opts,refineDeadline,network,'Resequencing after consolidation…');}
+    if(performance.now()<refineDeadline)await scenarioV38Relocate(opts,refineDeadline,network);
+    network.budgetExhausted=performance.now()>=refineDeadline;network.runtimeSeconds=(performance.now()-overallStart)/1000;
+    removed.networkAnalysis=network;removed.scratchBuild=scratch;
+
+    scenarioV39Progress('Validating complete solution…','Checking freight retention, route runtime, capacity, and customer windows');await scenarioV39Yield();
+    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],movedStops:network.stopsReassigned||0,v39:true};
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
+    if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=network.routesRetired||0;}
+    const modeled=scenarioComputeModelMetrics(opts);const freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;
+    let verdict=scenarioModelVerdict(original,modeled,postFilterMetrics,opts,{runtime:removed.runtimeViolations,capacity:removed.capacityViolations});
+    if(freightGate.failed)verdict.verdict='FAILED — INCOMPLETE FREIGHT';
+    else if(removed.runtimeViolations.length||removed.capacityViolations.length)verdict.verdict='COMPLETE FREIGHT — FEASIBILITY REVIEW REQUIRED';
+    else verdict.verdict='COMPLETE FREIGHT — NETWORK OPTIMIZED';
+    const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V39 Freight-First Async Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
+  }catch(err){console.error('V39 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+};
+
+const scenarioV39ReportBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV39ReportBase(r);if(r?.optimizerVersion!=='V39 Freight-First Async Optimizer')return html;
+  const n=r?.removed?.networkAnalysis||{},s=r?.removed?.scratchBuild||{},g=r?.removed?.freightIntegrityGate||{};
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${g.failed?'rgba(239,68,68,.7)':'rgba(62,207,142,.65)'};"><h3>V39 Freight-First Execution</h3><div class="scenario-help">Primary construction has no optimizer time cutoff. Every customer is processed, and any customer that misses the fast shortlist receives an exhaustive eligible-route scan before it can be classified Unassigned. Browser yields keep the page responsive; the 30-second budget applies only to post-build consolidation/refinement.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(g.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${s.initialPlacedStops||0}/${s.poolStops||0}</div><div class="l">Primary Placements</div></div><div class="scenario-kpi"><div class="v">${s.unassignedStops||0}</div><div class="l">Final Unassigned</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Freight Gate:</strong> ${g.failed?'FAILED — below 99.9% retention':'PASSED'} · <strong>Primary build:</strong> ${scenarioFmt(s.primaryBuildSeconds||0,1)} sec · <strong>Recovery:</strong> ${scenarioFmt(s.recoverySeconds||0,1)} sec · <strong>Route insertion tests:</strong> ${(s.routeTests||0).toLocaleString()} · <strong>Exhaustive fallback scans:</strong> ${s.exhaustiveFallbackScans||0} · <strong>Relaxed recoveries:</strong> ${s.relaxedRecoveries||0} · <strong>Post-build refinement budget reached:</strong> ${n.budgetExhausted?'Yes':'No'}.</div></div>`;
+};
+</script>
 </body>
 </html>
