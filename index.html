@@ -14397,5 +14397,223 @@ scenarioV27NetworkAnalysisHtml=function(r){
   return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V43 Service-Balanced Territory Execution</h3><div class="scenario-help">V43 pre-seeds enough geographic territories for the workload before growing routes, preserves service headroom during every growth insertion, protects large/difficult freight early, and uses the imported route only as a feasibility fallback for a stop that the source data already proved can be carried. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.geographicSeeds||0}/${s.desiredSeedRoutes||0}</div><div class="l">Actual / Planned Territory Seeds</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Service-rejected growth trials:</strong> ${(s.serviceRejectedGrowth||0).toLocaleString()} · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Service repair rounds:</strong> ${n.v43ServiceRepairRounds||0} · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
+
+<script>
+// ============================================================
+// V44 — TARGET-BUDGET EFFICIENCY OPTIMIZER
+// ============================================================
+// Full Model / Build From Scratch only. Lite ReOp is intentionally untouched.
+// V43 hit the service target but created excessive mileage because the legacy
+// dispatch evaluator charged an enormous penalty for EVERY late stop, even when
+// the route/network was already above the requested service target. That made
+// 96–100% local service more important than hundreds of avoidable miles.
+// V44 treats service as a FLOOR, allows the configured wait tolerance to be used,
+// and makes marginal miles/geographic affinity dominate once the service floor is
+// protected. Large source-proven freight is reserved before normal territory seeds.
+
+let scenarioV44Running=false;
+
+function scenarioV44DispatchStarts(route,opts,fine=false){
+  const win=scenarioV31ResourceWindow(route),orig=scenarioOriginalStart(route),starts=[];
+  if(!opts.optDispatch)return Number.isFinite(orig)?[orig]:[];
+  const lo=Number.isFinite(win.start)?win.start:(Number.isFinite(orig)?orig-120:0);
+  const hi=Number.isFinite(win.end)?Math.max(lo,win.end-30):(Number.isFinite(orig)?orig+480:lo+480);
+  const step=fine?10:30;
+  for(let s=lo;s<=hi;s+=step)starts.push(s);
+  if(Number.isFinite(orig)&&!starts.some(x=>Math.abs(x-orig)<1))starts.push(orig);
+  return starts;
+}
+function scenarioV44WaitOver(sim,allowed){
+  let over=0,max=0,total=0;
+  for(const d of sim?.stops||[]){if(d.layover)continue;const w=Math.max(0,+d.wait||0);total+=w;max=Math.max(max,w);over+=Math.max(0,w-allowed);}
+  return {over,max,total};
+}
+function scenarioV44LocalFloor(opts){return Math.max(88,Math.min(97,(+opts.targetOnTimePct||95)-3));}
+function scenarioV44BestDispatch(route,customers,opts,{relaxed=false,fine=false,floor=null}={}){
+  const order=scenarioComposePreservingDepots(route.id,scenarioOrderCustomersForSpecialRules(customers||[]));
+  const win=scenarioV31ResourceWindow(route),orig=scenarioOriginalStart(route),allowed=Math.max(0,+opts.allowedWaitMinutes||5);
+  const serviceFloor=Number.isFinite(+floor)?+floor:scenarioV44LocalFloor(opts);
+  let best=null;
+  for(const start of scenarioV44DispatchStarts(route,opts,fine)){
+    if(!Number.isFinite(start))continue;
+    const sim=scenarioEvaluateOrderedRoute(route,order,start);
+    if(Number.isFinite(win.end)&&sim.endEpoch>win.end+1e-6)continue;
+    if(!scenarioRuntimeOk(sim,opts,true))continue;
+    const svc=scenarioV40Service(sim),wait=scenarioV44WaitOver(sim,allowed);
+    if(!relaxed&&wait.max>Math.max(allowed+20,30))continue;
+    if(relaxed&&wait.max>120+1e-6)continue;
+    const short=Math.max(0,serviceFloor-svc.pct);
+    // Below the service floor is extremely expensive. ABOVE the floor, efficiency
+    // dominates; late stops and wait inside the user tolerance are not treated as
+    // catastrophic. This is the core V44 correction.
+    const score=short*1.2e9 + (short>0?svc.late*8e7:svc.late*12000) + wait.over*2.5e6 +
+      (sim.miles||0)*(opts.optMiles?260000:35000) + (sim.hours||0)*(opts.optTime?22000:6000) +
+      Math.abs(start-orig)*20;
+    if(!best||score<best.score)best={start,sim,order,score,wait,svc};
+  }
+  return best;
+}
+function scenarioV44Insertion(stop,route,opts,relaxed=false){
+  if(!scenarioCanTargetRoute(stop,route,opts))return null;
+  const base=scenarioV39Customers(route.id).filter(s=>s.id!==stop.id);
+  const cap=scenarioCapacityStatus(route,[...base,stop]);
+  if(!cap.known&&route.id!==scenarioOriginalRouteId(stop))return null;
+  if(cap.known&&!cap.ok)return null;
+  const baseMiles=scenarioRouteHasCustomerWork(route.id)?Math.max(0,scenarioRouteRuntime(route)?.miles||0):0;
+  let best=null;
+  for(const i of scenarioV322CandidatePositions(stop,base,opts)){
+    const candidate=[...base];candidate.splice(i,0,stop);
+    const ordered=scenarioOrderCustomersForSpecialRules(candidate);
+    const disp=scenarioV44BestDispatch(route,ordered,opts,{relaxed,fine:false});if(!disp)continue;
+    const marginal=Math.max(0,(disp.sim.miles||0)-baseMiles),aff=scenarioV42RouteAffinity(route,stop);
+    const score=disp.score + marginal*4.5e6 + aff*55000 + (base.length?0:180000);
+    const c={route,customers:ordered,order:disp.order,sim:disp.sim,start:disp.start,score,wait:disp.wait,_v44Marginal:marginal,_v44Affinity:aff};
+    if(!best||score<best.score)best=c;
+  }
+  return best;
+}
+function scenarioV44MegaThreshold(group){
+  const vals=(group||[]).map(s=>scenarioV32Cases(s)||0).sort((a,b)=>a-b);if(!vals.length)return Infinity;
+  const p95=vals[Math.min(vals.length-1,Math.floor(vals.length*.95))]||0;
+  return Math.max(500,p95*2.2);
+}
+function scenarioV44Commit(stop,cand){return !!(cand&&scenarioV34CommitVerified(stop.id,cand));}
+
+async function scenarioV44Build(opts){
+  const started=performance.now(),pool=scenarioV42BuildPool();
+  const stats={mode:'scratch',algorithm:'V44 target-budget geographic efficiency build',poolStops:pool.length,poolCases:pool.reduce((a,s)=>a+scenarioV32Cases(s),0),difficultFirstPlacements:0,initialPlacedStops:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,freightRecoveredCases:0,routesActivated:0,routesRetired:0,primaryBuildSeconds:0,recoverySeconds:0,routeTests:0,geographicSeeds:0,geographicGrowthPlacements:0,desiredSeedRoutes:0,serviceRejectedGrowth:0,megaFreightReserved:0,completionBased:true,budgetExceeded:false};
+  pool.forEach(s=>{s.scenarioV43SourceRouteId=s.routeId||s.scenarioV43SourceRouteId||null;s.routeId=null;s.seq=0;if(/^Build From Scratch:/i.test(s.scenarioRemovedReason||''))s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+  const groups=new Map();for(const s of pool){const k=scenarioV42DepotKey(s,opts);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);}
+  let totalDone=0;
+  for(const [key,group] of groups){
+    const dep=scenarioV42DepotForKey(key,group),eligible=scenarioV43EligibleUnion(group,opts),desired=scenarioV43DesiredRoutes(group,eligible.length,opts);stats.desiredSeedRoutes+=desired;
+    const usedRoutes=new Set(),seededStops=new Set();
+    // Reserve unusually large source-proven freight FIRST so normal territory
+    // seeding cannot consume the one resource we already know carried it.
+    const megaCut=scenarioV44MegaThreshold(group);
+    const mega=group.filter(s=>(scenarioV32Cases(s)||0)>=megaCut).sort((a,b)=>scenarioV32Cases(b)-scenarioV32Cases(a));
+    for(const s of mega){
+      const orig=s.scenarioV43SourceRouteId?eligible.find(r=>r.id===s.scenarioV43SourceRouteId):null;
+      let cand=orig&&!scenarioRouteHasCustomerWork(orig.id)?scenarioV44Insertion(s,orig,opts,true):null;stats.routeTests++;
+      if(!cand){const choices=eligible.filter(r=>!scenarioRouteHasCustomerWork(r.id)).slice(0,12);for(const r of choices){const c=scenarioV44Insertion(s,r,opts,true);stats.routeTests++;if(c&&(!cand||c.score<cand.score))cand=c;}}
+      if(scenarioV44Commit(s,cand)){usedRoutes.add(cand.route.id);seededStops.add(s.id);stats.megaFreightReserved++;stats.geographicSeeds++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;totalDone++;}
+      await scenarioV39Yield();
+    }
+    const anchorCount=Math.max(0,desired-usedRoutes.size),anchors=scenarioV43SeedAnchors(group.filter(s=>!seededStops.has(s.id)),anchorCount,dep);
+    for(const anchor of anchors){
+      let best=null;
+      const dormant=eligible.filter(r=>!usedRoutes.has(r.id)&&!scenarioRouteHasCustomerWork(r.id));
+      for(const r of dormant.slice(0,16)){const c=scenarioV44Insertion(anchor,r,opts,false);stats.routeTests++;if(c&&(!best||c.score<best.score))best=c;}
+      if(scenarioV44Commit(anchor,best)){usedRoutes.add(best.route.id);seededStops.add(anchor.id);stats.geographicSeeds++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;totalDone++;}
+      scenarioV39Progress('Seeding V44 efficient territories…',`${totalDone}/${pool.length} placed · ${usedRoutes.size}/${desired} territory resources`);await scenarioV39Yield();
+    }
+    const remaining=group.filter(s=>!seededStops.has(s.id)&&!s.routeId).sort((a,b)=>scenarioV43AnchorPriority(b,dep)-scenarioV43AnchorPriority(a,dep));
+    for(const s of remaining){
+      let active=eligible.filter(r=>scenarioRouteHasCustomerWork(r.id));
+      active.sort((a,b)=>scenarioV42RouteAffinity(a,s)-scenarioV42RouteAffinity(b,s));
+      let best=null;
+      // Only the six geographically closest territories receive expensive insertion
+      // simulations. This both reduces cross-haul and cuts V43's 50-minute runtime.
+      for(const r of active.slice(0,Math.min(6,active.length))){const c=scenarioV44Insertion(s,r,opts,false);stats.routeTests++;if(c&&(!best||c.score<best.score))best=c;else if(!c)stats.serviceRejectedGrowth++;}
+      if(!best){
+        const dormant=eligible.filter(r=>!scenarioRouteHasCustomerWork(r.id));
+        for(const r of dormant.slice(0,6)){const c=scenarioV44Insertion(s,r,opts,false);stats.routeTests++;if(c&&(!best||c.score<best.score))best=c;}
+      }
+      if(scenarioV44Commit(s,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;stats.geographicGrowthPlacements++;totalDone++;}
+      if(totalDone%3===0){scenarioV39Progress('Growing mileage-efficient territories…',`${totalDone}/${pool.length} placed · ${routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length} active routes`);await scenarioV39Yield();}
+    }
+  }
+  let unplaced=pool.filter(s=>!s.routeId),done=0;
+  for(const s of [...unplaced]){
+    let best=null;const rs=scenarioV39EligibleRoutes(s,opts,'').sort((a,b)=>scenarioV39CheapRouteScore(a,s)-scenarioV39CheapRouteScore(b,s));
+    for(const r of rs){const c=scenarioV44Insertion(s,r,opts,true);stats.routeTests++;if(c&&(!best||c.score<best.score))best=c;}
+    if(scenarioV44Commit(s,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;}
+    done++;if(done%2===0){scenarioV39Progress('Completing V44 freight placement…',`${done}/${unplaced.length} difficult stop(s) reviewed`);await scenarioV39Yield();}
+  }
+  unplaced=pool.filter(s=>!s.routeId);stats.primaryBuildSeconds=(performance.now()-started)/1000;stats.initialUnassigned=unplaced.length;
+  for(const s of unplaced){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: awaiting V44 freight recovery';}
+  stats.unassignedStops=unplaced.length;stats.unassignedCases=unplaced.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  return stats;
+}
+
+async function scenarioV44SequenceAll(opts,stats,label='V44 mileage/service sequencing…',fine=false){
+  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id));let done=0;
+  for(const r of active){
+    if(!scenarioRouteIsProtectedLongHaul(r)){
+      let cs=scenarioV39Customers(r.id).sort((a,b)=>(a.seq||0)-(b.seq||0));
+      if(cs.length){
+        let best=scenarioV44BestDispatch(r,cs,opts,{relaxed:true,fine,floor:scenarioV44LocalFloor(opts)});
+        if(best){
+          const n=cs.length,maxTrials=Math.min(fine?70:32,Math.max(10,n*3));let trials=0,improved=true;
+          while(improved&&trials<maxTrials){improved=false;
+            for(let i=0;i<n-1&&trials<maxTrials;i++){
+              const cand=cs.slice();[cand[i],cand[i+1]]=[cand[i+1],cand[i]];
+              const ev=scenarioV44BestDispatch(r,cand,opts,{relaxed:true,fine:false,floor:scenarioV44LocalFloor(opts)});trials++;
+              if(ev&&ev.score+1<best.score){best=ev;cs=cand;improved=true;stats.localSequenceMoves=(stats.localSequenceMoves||0)+1;}
+            }
+          }
+          scenarioV40CommitOrder(r,best);
+        }
+      }
+    }
+    done++;if(done%3===0||done===active.length){scenarioV39Progress(label,`${done}/${active.length} active routes`);await scenarioV39Yield();}
+  }
+}
+
+runScenarioModel=async function(){
+  if(scenarioV44Running){showToast('Scenario optimization is already running.');return;}
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  scenarioV44Running=true;scenarioV43Running=true;scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
+  const overallStart=performance.now();
+  try{
+    const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+    if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+    scenarioV39Progress('Preparing V44 target-budget optimization…',`Freight first · ≥${scenarioFmt(opts.targetOnTimePct,1)}% network service · then minimum miles/hours`);await scenarioV39Yield();
+    restoreScenarioBaseline();
+    stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+    scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+    const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+    if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+    let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV44Build(opts);
+    const network={optimizer:'V44 target-budget efficiency async',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+    await scenarioV44SequenceAll(opts,network,'Sequencing V44 compact routes…',false);
+    let recovery=await scenarioV42RecoverFreight(opts,network,240000);
+    if(recovery.direct||recovery.ejected)await scenarioV44SequenceAll(opts,network,'Resequencing recovered freight…',false);
+    let quality=scenarioV40NetworkQuality(opts);
+    if(quality.validFreight&&!quality.validService)quality=await scenarioV43ServiceRepair(opts,network,180000);
+    const efficiencyDeadline=performance.now()+300000;
+    if(quality.validFreight&&quality.validFeasibility&&quality.validService){
+      await scenarioV44SequenceAll(opts,network,'Polishing miles above service floor…',true);
+      quality=scenarioV40NetworkQuality(opts);
+      if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline)await scenarioV42CrossRouteMileage(opts,network,efficiencyDeadline);
+      if(performance.now()<efficiencyDeadline)await scenarioV44SequenceAll(opts,network,'Final route mileage polish…',true);
+      quality=scenarioV40NetworkQuality(opts);
+      if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline)await scenarioV40RetireRoutes(opts,network,efficiencyDeadline);
+    }
+    quality=scenarioV40NetworkQuality(opts);if(quality.validFreight&&!quality.validService)quality=await scenarioV43ServiceRepair(opts,network,90000);
+    network.budgetExhausted=performance.now()>=efficiencyDeadline;network.runtimeSeconds=(performance.now()-overallStart)/1000;network.v42Recovery=recovery;removed.networkAnalysis=network;removed.scratchBuild=scratch;
+    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],redistributedStops:network.stopsReassigned||0,v44:true};
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
+    if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=network.routesRetired||0;scratch.v42Recovery=recovery;}
+    const modeled=scenarioComputeModelMetrics(opts),freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;
+    removed.absoluteServiceGate={target:opts.targetOnTimePct,actual:modeled.onTimePct,failed:modeled.onTimePct+1e-9<opts.targetOnTimePct};
+    const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'VALID SOLUTION — ABSOLUTE QUALITY TARGET MET',freightRetentionPct:finalQuality.retention,onTimeDrop:0,waitIncrease:0,expenseIncrease:0};
+    if(!finalQuality.validFreight)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if(!finalQuality.validFeasibility)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if(!finalQuality.validService)verdict.verdict=`FAILED — SERVICE BELOW ${scenarioFmt(opts.targetOnTimePct,1)}% TARGET`;
+    const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V44 Target-Budget Efficiency Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
+  }catch(err){console.error('V44 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+};
+
+const scenarioV44ReportBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV44ReportBase(r);if(r?.optimizerVersion!=='V44 Target-Budget Efficiency Optimizer')return html;
+  const n=r.removed?.networkAnalysis||{},s=r.removed?.scratchBuild||{},rec=n.v42Recovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V44 Target-Budget Efficiency Execution</h3><div class="scenario-help">V44 corrects the V43 objective mismatch: service is a hard floor, not an unlimited reward. Once a route is inside the service tolerance, marginal miles and geographic compactness dominate. Wait inside the configured allowance can be used when it improves routing efficiency. Large source-proven freight is reserved before normal territory growth. Lite ReOp remains unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.megaFreightReserved||0}</div><div class="l">Large Freight Reserved</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Route tests:</strong> ${(s.routeTests||0).toLocaleString()} · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Sequence improvements:</strong> ${n.localSequenceMoves||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+};
+</script>
+
 </body>
 </html>
