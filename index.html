@@ -13876,5 +13876,293 @@ scenarioV27NetworkAnalysisHtml=function(r){
 };
 
 </script>
+
+<script>
+// ============================================================
+// V42 — GEOGRAPHIC SEED-AND-GROW ABSOLUTE QUALITY OPTIMIZER
+// ============================================================
+// Full Model only. Lite ReOp is intentionally untouched.
+// Corrections vs V41:
+//  1) Fix recovery blind spot: V39 marked failed build stops with a
+//     scenarioRemovedReason, which caused V41 recovery to exclude them.
+//  2) Replace stop-by-stop global placement with depot-aware geographic
+//     seed-and-grow construction. A route is seeded by remote/hard freight and
+//     filled with nearby feasible customers before another resource is opened.
+//  3) Freight and service are hard gates again. Mileage/retirement work cannot
+//     run until >=99.9% freight is retained and the requested on-time target is met.
+//  4) Cross-route mileage moves are bounded and are rolled back if the *global*
+//     service target, runtime, or capacity gate is violated.
+
+let scenarioV42Running=false;
+
+function scenarioV42BuildPool(){
+  return stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&(!s.scenarioRemovedReason||/^Build From Scratch:/i.test(s.scenarioRemovedReason)));
+}
+function scenarioV42DepotKey(stop,opts){
+  try{return scenarioV30GroupDepot(stop,opts)||'__GLOBAL__';}catch(e){return '__GLOBAL__';}
+}
+function scenarioV42DepotForKey(key,group){
+  let d=depotLocations.find(x=>scenarioNormalizeDepotKey(x.locationKey)===scenarioNormalizeDepotKey(key));
+  if(d)return d;
+  const first=(group||[])[0];
+  if(first){
+    try{
+      const rs=scenarioV31CandidateRoutesForStop(first,{keepAssignedDepot:true},null)||[];
+      if(rs.length)return routeInitialDepot(rs[0])||routeFinalDepot(rs[0])||null;
+    }catch(e){}
+  }
+  return null;
+}
+function scenarioV42Distance(a,b){
+  try{return scenarioV32Miles(a,b)||0;}catch(e){return (a&&b&&a.lat&&b.lat)?haversine(a.lat,a.lng,b.lat,b.lng):0;}
+}
+function scenarioV42WindowWidth(s){
+  const w=scenarioStopWindow(s);return Number.isFinite(w.early)&&Number.isFinite(w.late)?Math.max(30,w.late-w.early):720;
+}
+function scenarioV42AnchorScore(s,dep){
+  const dist=dep?scenarioV42Distance(dep,s):0;
+  const cases=scenarioV32Cases(s)||0;
+  const tight=720/scenarioV42WindowWidth(s);
+  // Remote customers establish geographic territories; large/tight-window freight
+  // gets enough weight to secure a feasible resource early.
+  return dist*100000+cases*1700+tight*85000;
+}
+function scenarioV42InsertionBase(stop,route,opts,relaxed=false){
+  try{
+    if(typeof scenarioV33InsertionBase!=='undefined')return scenarioV33InsertionBase(stop,route,opts,relaxed);
+  }catch(e){}
+  try{return scenarioV322Insertion(stop,route,opts,relaxed);}catch(e){return null;}
+}
+function scenarioV42RouteAffinity(route,stop){
+  const cs=scenarioV39Customers(route.id);
+  if(!cs.length){const d=routeInitialDepot(route)||routeFinalDepot(route);return d?scenarioV42Distance(d,stop):1e9;}
+  let nearest=1e9;
+  for(const s of cs){const d=scenarioV42Distance(s,stop);if(d<nearest)nearest=d;}
+  const c=scenarioV32Centroid(cs),cd=c?scenarioV42Distance(c,stop):nearest;
+  return nearest*.68+cd*.32;
+}
+function scenarioV42CandidateValue(cand,route,baseMiles,stop){
+  if(!cand||!cand.sim)return Number.POSITIVE_INFINITY;
+  const svc=scenarioV40Service(cand.sim);
+  const marginal=Math.max(0,(cand.sim.miles||0)-(baseMiles||0));
+  const target=98; // construction buffer above the final 95% default target
+  const serviceShort=Math.max(0,target-svc.pct);
+  const waitOver=Math.max(0,svc.maxWait-5);
+  // Service stays dominant, but among service-compatible insertions the route
+  // with the smallest real marginal mileage wins.
+  return serviceShort*2e9+svc.late*4e8+waitOver*3e7+svc.wait*2e5+marginal*2e6+scenarioV42RouteAffinity(route,stop)*12000;
+}
+function scenarioV42PickSeedRoute(anchor,opts){
+  let eligible=scenarioV39EligibleRoutes(anchor,opts,'');
+  const dormant=eligible.filter(r=>!scenarioRouteHasCustomerWork(r.id));
+  const pool=dormant.length?dormant:eligible;
+  let best=null,bestVal=Infinity;
+  for(const r of pool){
+    const c=scenarioV42InsertionBase(anchor,r,opts,false)||scenarioV42InsertionBase(anchor,r,opts,true);
+    if(!c)continue;
+    const svc=scenarioV40Service(c.sim);
+    const v=Math.max(0,95-svc.pct)*2e9+svc.late*4e8+(c.sim.miles||0)*1e6+(c.sim.hours||0)*25000;
+    if(v<bestVal){bestVal=v;best=c;}
+  }
+  return best;
+}
+
+async function scenarioV42Build(opts){
+  const started=performance.now(),pool=scenarioV42BuildPool();
+  const stats={mode:'scratch',algorithm:'V42 depot-aware geographic seed-and-grow',poolStops:pool.length,poolCases:pool.reduce((a,s)=>a+scenarioV32Cases(s),0),difficultFirstPlacements:0,initialPlacedStops:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,freightRecoveredCases:0,routesActivated:0,routesRetired:0,primaryBuildSeconds:0,recoverySeconds:0,routeTests:0,geographicSeeds:0,geographicGrowthPlacements:0,completionBased:true,budgetExceeded:false};
+  pool.forEach(s=>{s.routeId=null;s.seq=0;if(/^Build From Scratch:/i.test(s.scenarioRemovedReason||''))s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+
+  const groups=new Map();
+  for(const s of pool){const k=scenarioV42DepotKey(s,opts);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);}
+  let totalDone=0;
+  for(const [key,group] of groups){
+    const dep=scenarioV42DepotForKey(key,group);let remaining=[...group];
+    while(remaining.length){
+      remaining.sort((a,b)=>scenarioV42AnchorScore(b,dep)-scenarioV42AnchorScore(a,dep));
+      const anchor=remaining[0];
+      const seed=scenarioV42PickSeedRoute(anchor,opts);
+      if(!seed){remaining.shift();continue;}
+      const wasDormant=!scenarioRouteHasCustomerWork(seed.route.id);
+      if(!scenarioV34CommitVerified(anchor.id,seed)){remaining.shift();continue;}
+      if(wasDormant)stats.routesActivated++;
+      stats.geographicSeeds++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;
+      remaining=remaining.filter(s=>s.id!==anchor.id);totalDone++;
+      scenarioV39Progress('Building geographic route territories…',`${totalDone}/${pool.length} stops placed · ${stats.routesActivated} resources activated`);await scenarioV39Yield();
+
+      // Grow this territory before opening another route. Nearby customers are
+      // tested first, but the shortlist expands if windows/capacity reject them.
+      let noGainPasses=0;
+      while(remaining.length&&noGainPasses<2){
+        const liveRoute=routes.find(r=>r.id===seed.route.id);if(!liveRoute)break;
+        const baseEv=scenarioV40BestOrderEval(liveRoute,scenarioV39Customers(liveRoute.id),opts);
+        const baseMiles=baseEv?.sim?.miles||0;
+        const ranked=[...remaining].sort((a,b)=>scenarioV42RouteAffinity(liveRoute,a)-scenarioV42RouteAffinity(liveRoute,b));
+        const limit=noGainPasses?Math.min(40,ranked.length):Math.min(18,ranked.length);
+        let best=null,bestValue=Infinity;
+        for(let i=0;i<limit;i++){
+          const s=ranked[i];
+          let c=scenarioV42InsertionBase(s,liveRoute,opts,false);stats.routeTests++;
+          if(!c)continue;
+          const v=scenarioV42CandidateValue(c,liveRoute,baseMiles,s);
+          if(v<bestValue){bestValue=v;best={s,c};}
+        }
+        if(!best){noGainPasses++;await scenarioV39Yield();continue;}
+        if(!scenarioV34CommitVerified(best.s.id,best.c)){noGainPasses++;continue;}
+        stats.geographicGrowthPlacements++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;
+        remaining=remaining.filter(s=>s.id!==best.s.id);totalDone++;noGainPasses=0;
+        if(totalDone%3===0){scenarioV39Progress('Filling compact route territories…',`${totalDone}/${pool.length} stops placed · ${remaining.length} left in current depot group`);await scenarioV39Yield();}
+      }
+    }
+  }
+
+  // Anything not placed by seed/grow receives a full V39 exhaustive placement
+  // before being marked for recovery.
+  let unplaced=pool.filter(s=>!s.routeId);let processed=0;
+  for(const s of [...unplaced]){
+    const x=scenarioV39FindPlacement(s,opts,{relaxed:true,exhaustiveOnMiss:true});stats.routeTests+=(x.tested||0);
+    if(x.best&&scenarioV34CommitVerified(s.id,x.best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;unplaced=unplaced.filter(x=>x.id!==s.id);}
+    processed++;if(processed%2===0){scenarioV39Progress('Completing geographic build…',`${processed}/${unplaced.length+processed} fallback stop(s) reviewed`);await scenarioV39Yield();}
+  }
+  stats.primaryBuildSeconds=(performance.now()-started)/1000;stats.initialUnassigned=unplaced.length;
+  for(const s of unplaced){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: awaiting V42 freight recovery';}
+  stats.unassignedStops=unplaced.length;stats.unassignedCases=unplaced.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  return stats;
+}
+
+async function scenarioV42RecoverFreight(opts,stats,budgetMs=150000){
+  // Critical V41 bug fix: include prior build failures in recovery instead of
+  // filtering them out because scenarioRemovedReason is populated.
+  const candidates=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.routeId&&(!s.scenarioRemovedReason||/^Build From Scratch:/i.test(s.scenarioRemovedReason)));
+  candidates.forEach(s=>{if(/^Build From Scratch:/i.test(s.scenarioRemovedReason||''))s.scenarioRemovedReason='';});
+  const started=performance.now(),deadline=started+budgetMs;let direct=0,ejected=0,done=0;
+  candidates.sort((a,b)=>scenarioV33FreightPriority(b,opts)-scenarioV33FreightPriority(a,opts));
+  scenarioV322RecoveryDeadline=deadline;
+  for(const s0 of candidates){
+    if(performance.now()>=deadline)break;
+    const s=stops.find(x=>x.id===s0.id);if(!s||s.routeId){done++;continue;}
+    const x=scenarioV39FindPlacement(s,opts,{relaxed:true,exhaustiveOnMiss:true});
+    if(x.best&&scenarioV34CommitVerified(s.id,x.best)){direct++;stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(s);}
+    else if(scenarioV34TryEjection(s.id,opts,stats,3)){ejected++;}
+    done++;scenarioV39Progress('Recovering all freight…',`${done}/${candidates.length} difficult stop(s) reviewed · ${direct+ejected} recovered`);await scenarioV39Yield();
+  }
+  scenarioV322RecoveryDeadline=0;
+  const final=stops.filter(s=>s.sourceType==='route-data'&&!scenarioIsFixedRouteAnchor(s)&&!s.routeId&&(!s.scenarioRemovedReason||/^Build From Scratch:/i.test(s.scenarioRemovedReason)));
+  final.forEach(s=>{s.scenarioRemovedReason='Build From Scratch: no feasible V42 placement after exhaustive recovery';});
+  return {initial:candidates.length,final:final.length,direct,ejected,seconds:(performance.now()-started)/1000};
+}
+
+async function scenarioV42CrossRouteMileage(opts,stats,deadline){
+  let evaluated=0,accepted=0,saved=0;
+  const target=Math.max(50,+opts.targetOnTimePct||95);
+  for(let pass=0;pass<2&&performance.now()<deadline;pass++){
+    let improved=false;
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r));
+    for(const srcRef of active){
+      if(performance.now()>=deadline)break;
+      const src=scenarioV34LiveRoute(srcRef.id);if(!src)continue;
+      const cs=scenarioV39Customers(src.id);if(cs.length<=3)continue;
+      const center=scenarioV32Centroid(cs);
+      const candidates=[...cs].sort((a,b)=>(center?scenarioV42Distance(b,center):0)-(center?scenarioV42Distance(a,center):0)).slice(0,5);
+      for(const sRef of candidates){
+        if(performance.now()>=deadline)break;
+        const live=scenarioV34LiveStop(sRef.id);if(!live)continue;
+        const dests=scenarioV39EligibleRoutes(live,opts,src.id).filter(r=>scenarioRouteHasCustomerWork(r.id)).sort((a,b)=>scenarioV42RouteAffinity(a,live)-scenarioV42RouteAffinity(b,live)).slice(0,4);
+        for(const dRef of dests){
+          if(performance.now()>=deadline)break;
+          evaluated++;
+          const snap=scenarioSnapshotWorkingState();
+          let s=scenarioV34LiveStop(sRef.id),sr=scenarioV34LiveRoute(src.id),dr=scenarioV34LiveRoute(dRef.id);if(!s||!sr||!dr){scenarioRestoreWorkingState(snap);continue;}
+          const b1=scenarioV40BestOrderEval(sr,scenarioV39Customers(sr.id),opts),b2=scenarioV40BestOrderEval(dr,scenarioV39Customers(dr.id),opts);if(!b1||!b2){scenarioRestoreWorkingState(snap);continue;}
+          s.routeId=null;s.seq=0;
+          const a1=scenarioV40BestOrderEval(sr,scenarioV39Customers(sr.id).filter(x=>x.id!==s.id),opts);
+          const ins=scenarioV42InsertionBase(s,dr,opts,false);
+          if(!a1||!ins){scenarioRestoreWorkingState(snap);continue;}
+          const gain=(b1.sim.miles+b2.sim.miles)-(a1.sim.miles+ins.sim.miles);
+          if(gain<4){scenarioRestoreWorkingState(snap);continue;}
+          scenarioRestoreWorkingState(snap);
+          s=scenarioV34LiveStop(sRef.id);sr=scenarioV34LiveRoute(src.id);dr=scenarioV34LiveRoute(dRef.id);
+          s.routeId=null;s.seq=0;
+          const srcEv=scenarioV40BestOrderEval(sr,scenarioV39Customers(sr.id).filter(x=>x.id!==s.id),opts),destIns=scenarioV42InsertionBase(s,dr,opts,false);
+          if(!srcEv||!destIns){scenarioRestoreWorkingState(snap);continue;}
+          scenarioV40CommitOrder(sr,srcEv);
+          if(!scenarioV34CommitVerified(s.id,destIns)){scenarioRestoreWorkingState(snap);continue;}
+          const q=scenarioV40NetworkQuality(opts);
+          if(!q.validFreight||!q.validFeasibility||q.m.onTimePct+1e-9<target){scenarioRestoreWorkingState(snap);continue;}
+          accepted++;saved+=gain;improved=true;stats.stopsReassigned=(stats.stopsReassigned||0)+1;stats.relocationsAccepted=(stats.relocationsAccepted||0)+1;
+          if(evaluated%5===0){scenarioV39Progress('Rebalancing compact territories…',`${evaluated} tested · ${accepted} accepted · ${scenarioFmt(saved,1)} miles removed`);await scenarioV39Yield();}
+        }
+      }
+    }
+    if(!improved)break;
+  }
+  stats.relocationsEvaluated=(stats.relocationsEvaluated||0)+evaluated;stats.v42CrossRouteMoves=accepted;stats.v42CrossRouteMilesSaved=saved;
+  return {evaluated,accepted,saved};
+}
+
+runScenarioModel=async function(){
+  if(scenarioV42Running){showToast('Scenario optimization is already running.');return;}
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
+  const overallStart=performance.now();
+  try{
+    const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+    if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+    scenarioV39Progress('Preparing V42 geographic optimization…',`100% freight · ≥${scenarioFmt(opts.targetOnTimePct,1)}% on-time · then routes/miles/hours`);await scenarioV39Yield();
+    restoreScenarioBaseline();
+    stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+    scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+    const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+    if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+    let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV42Build(opts);
+    const network={optimizer:'V42 geographic seed-and-grow absolute-quality async',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+
+    await scenarioV39SequenceAll(opts,null,network,'Optimizing service-aware sequence…');
+    let recovery=await scenarioV42RecoverFreight(opts,network,150000);
+    if(recovery.direct||recovery.ejected)await scenarioV39SequenceAll(opts,null,network,'Resequencing recovered freight…');
+    let quality=scenarioV40NetworkQuality(opts);
+    if(quality.validFreight&&!quality.validService)await scenarioV40RepairService(opts,network,performance.now()+120000);
+    quality=scenarioV40NetworkQuality(opts);
+
+    // HARD GATE: no efficiency work until freight and service are valid.
+    const efficiencyDeadline=performance.now()+180000;
+    if(quality.validFreight&&quality.validFeasibility&&quality.validService){
+      await scenarioV41RouteMileagePolish(opts,network,Math.min(efficiencyDeadline,performance.now()+45000));
+      if(performance.now()<efficiencyDeadline)await scenarioV42CrossRouteMileage(opts,network,efficiencyDeadline);
+      if(performance.now()<efficiencyDeadline)await scenarioV41RouteMileagePolish(opts,network,Math.min(efficiencyDeadline,performance.now()+45000));
+      quality=scenarioV40NetworkQuality(opts);
+      if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline){
+        await scenarioV40RetireRoutes(opts,network,efficiencyDeadline);
+        await scenarioV41RouteMileagePolish(opts,network,efficiencyDeadline);
+      }
+    }
+    quality=scenarioV40NetworkQuality(opts);
+    if(quality.validFreight&&!quality.validService)await scenarioV40RepairService(opts,network,performance.now()+60000);
+
+    network.budgetExhausted=performance.now()>=efficiencyDeadline;network.runtimeSeconds=(performance.now()-overallStart)/1000;network.v42Recovery=recovery;removed.networkAnalysis=network;removed.scratchBuild=scratch;
+    scenarioV39Progress('Validating V42 solution…','Checking complete freight, ≥ target service, runtime/capacity and geographic efficiency');await scenarioV39Yield();
+    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],movedStops:network.stopsReassigned||0,v42:true};
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
+    if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=network.routesRetired||0;scratch.v42Recovery=recovery;}
+    const modeled=scenarioComputeModelMetrics(opts),freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;
+    const serviceGate={target:opts.targetOnTimePct,actual:modeled.onTimePct,failed:modeled.onTimePct+1e-9<opts.targetOnTimePct};removed.absoluteServiceGate=serviceGate;
+    const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'ABSOLUTE QUALITY TARGET MET',freightRetentionPct:finalQuality.retention,onTimeDrop:0,waitIncrease:0,expenseIncrease:0};
+    if(!finalQuality.validFreight)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if(!finalQuality.validFeasibility)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if(!finalQuality.validService)verdict.verdict=`FAILED — SERVICE BELOW ${scenarioFmt(opts.targetOnTimePct,1)}% TARGET`;else verdict.verdict='VALID SOLUTION — ABSOLUTE QUALITY TARGET MET';
+    const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V42 Geographic Seed-and-Grow Absolute-Quality Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
+  }catch(err){console.error('V42 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+};
+
+const scenarioV42ReportBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV42ReportBase(r);if(r?.optimizerVersion!=='V42 Geographic Seed-and-Grow Absolute-Quality Optimizer')return html;
+  const n=r.removed?.networkAnalysis||{},s=r.removed?.scratchBuild||{},rec=n.v42Recovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95;
+  const fg=r.removed?.freightIntegrityGate||{};
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V42 Geographic Seed-and-Grow Execution</h3><div class="scenario-help">Full Model now builds compact depot-based route territories before opening additional resources. Build-failed freight remains eligible for recovery. Freight and the absolute service target are hard gates before any mileage or route-retirement work. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.geographicSeeds||0}</div><div class="l">Geographic Route Seeds</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Seed/grow placements:</strong> ${s.geographicSeeds||0} seed + ${s.geographicGrowthPlacements||0} nearby growth · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated, ${scenarioFmt(n.v42CrossRouteMilesSaved||0,1)} mi saved · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+};
+</script>
 </body>
 </html>
