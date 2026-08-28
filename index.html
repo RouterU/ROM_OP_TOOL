@@ -13625,5 +13625,256 @@ scenarioV27NetworkAnalysisHtml=function(r){
 };
 </script>
 
+
+<script>
+// ============================================================
+// V41 — FREIGHT RECOVERY + GEOGRAPHIC EFFICIENCY FULL MODEL
+// ============================================================
+// Full Model only. Lite ReOp and all other application paths remain unchanged.
+// Key corrections:
+//  1) V39/V40's 2.5M dormant-route penalty could dominate geography and create
+//     long cross-haul routes. V41 reduces that to a modest activation cost.
+//  2) An unassigned high-volume stop gets bounded ejection-chain recovery before
+//     the solution can move on to efficiency work.
+//  3) Mileage refinement runs even when freight is not yet perfect (retirement
+//     still requires complete freight), and can use service headroom down to the
+//     absolute target instead of protecting every extra point above target.
+
+let scenarioV41Running=false;
+
+// Keep geography/route insertion quality dominant. Opening a route is still a
+// cost, but no longer worth hundreds/thousands of road miles.
+scenarioV39PlacementScore=function(cand,route){
+  const load=scenarioV39Customers(route.id).length;
+  const dormant=!scenarioRouteHasCustomerWork(route.id);
+  const activationPenalty=dormant?85000:0;
+  const fillReward=Math.min(load,16)*4500;
+  return (Number.isFinite(+cand.score)?+cand.score:0)+activationPenalty-fillReward;
+};
+
+async function scenarioV41RecoverFreight(opts,stats,budgetMs=75000){
+  const started=performance.now(),deadline=started+budgetMs;
+  let missing=scenarioV39Pool().filter(s=>!s.routeId);
+  let direct=0,ejected=0,processed=0;
+  if(!missing.length)return {initial:0,final:0,direct:0,ejected:0,seconds:0};
+
+  // Largest / hardest freight first. This is particularly important for large
+  // multi-order customer locations that need route capacity deliberately freed.
+  missing.sort((a,b)=>scenarioV33FreightPriority(b,opts)-scenarioV33FreightPriority(a,opts));
+  scenarioV322RecoveryDeadline=deadline;
+  for(const ref of missing){
+    if(performance.now()>=deadline)break;
+    const s=stops.find(x=>x.id===ref.id);if(!s||s.routeId){processed++;continue;}
+    let x=scenarioV39FindPlacement(s,opts,{relaxed:true,exhaustiveOnMiss:true});
+    if(x.best&&scenarioV34CommitVerified(s.id,x.best)){
+      direct++;stats.freightRecoveredCases=(stats.freightRecoveredCases||0)+scenarioV32Cases(s);
+    }else if(scenarioV34TryEjection(s.id,opts,stats,2)){
+      ejected++;
+    }
+    processed++;
+    scenarioV39Progress('Recovering complete freight…',`${processed}/${missing.length} difficult stop(s) reviewed · ${direct+ejected} recovered`);
+    await scenarioV39Yield();
+  }
+  scenarioV322RecoveryDeadline=0;
+  const finalMissing=scenarioV39Pool().filter(s=>!s.routeId);
+  return {initial:missing.length,final:finalMissing.length,direct,ejected,seconds:(performance.now()-started)/1000};
+}
+
+function scenarioV41ServiceHeadroom(opts){
+  const total=Math.max(1,scenarioComputeModelMetrics(opts).stopsPlanned||scenarioV39Pool().filter(s=>s.routeId).length||1);
+  const late=scenarioV40LateStops(opts).length;
+  const maxLate=Math.max(0,Math.floor(total*(1-(Math.max(0,Math.min(100,+opts.targetOnTimePct||95))/100))));
+  return {total,late,maxLate,headroom:Math.max(0,maxLate-late)};
+}
+
+async function scenarioV41RouteMileagePolish(opts,stats,deadline){
+  let moves=0,saved=0,done=0;
+  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r));
+  for(const r0 of active){
+    if(performance.now()>=deadline)break;
+    // Short route-local slice prevents any one 2-opt neighborhood monopolizing Chromium.
+    const localDeadline=Math.min(deadline,performance.now()+900);
+    const x=scenarioV34RouteMileagePolish(scenarioV34LiveRoute(r0.id),opts,localDeadline);
+    moves+=x.moves||0;saved+=x.milesSaved||0;done++;
+    if(done%2===0||done===active.length){
+      scenarioV39Progress('Reducing route mileage…',`${done}/${active.length} routes polished · ${scenarioFmt(saved,1)} miles removed`);
+      await scenarioV39Yield();
+    }
+  }
+  stats.v41RouteSequenceMoves=(stats.v41RouteSequenceMoves||0)+moves;
+  stats.v41RouteMilesSaved=(stats.v41RouteMilesSaved||0)+saved;
+  return {moves,saved};
+}
+
+async function scenarioV41CrossRouteMileage(opts,stats,deadline){
+  let evaluated=0,accepted=0,saved=0,passes=0;
+  while(performance.now()<deadline&&passes<4){
+    passes++;let improved=false;
+    const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r));
+    let service=scenarioV41ServiceHeadroom(opts);
+
+    sourceLoop: for(const sourceRef of active){
+      if(performance.now()>=deadline)break;
+      const source=scenarioV34LiveRoute(sourceRef.id);if(!source)continue;
+      const srcCustomers=scenarioV39Customers(source.id);if(srcCustomers.length<=2)continue;
+
+      // Misfit candidates: customers that have another route territory materially
+      // closer than their current route territory. Farthest-from-current-centroid
+      // candidates are also considered to unwind cross-haul created during build.
+      const center=scenarioV32Centroid(srcCustomers);
+      const candidates=[...srcCustomers].sort((a,b)=>{
+        const da=center?scenarioV32Miles(a,center):0,db=center?scenarioV32Miles(b,center):0;
+        return (db||0)-(da||0);
+      }).slice(0,7);
+
+      for(const stopRef of candidates){
+        if(performance.now()>=deadline)break sourceLoop;
+        const stopId=stopRef.id,liveStop=scenarioV34LiveStop(stopId);if(!liveStop)continue;
+        const dests=scenarioV39EligibleRoutes(liveStop,opts,source.id)
+          .filter(r=>scenarioRouteHasCustomerWork(r.id))
+          .sort((a,b)=>scenarioV321RouteDistanceToStop(a,liveStop)-scenarioV321RouteDistanceToStop(b,liveStop))
+          .slice(0,6);
+
+        for(const destRef of dests){
+          if(performance.now()>=deadline)break sourceLoop;
+          evaluated++;
+          const snap=scenarioSnapshotWorkingState();
+          let s=scenarioV34LiveStop(stopId),src=scenarioV34LiveRoute(source.id),dst=scenarioV34LiveRoute(destRef.id);
+          if(!s||!src||!dst){scenarioRestoreWorkingState(snap);continue;}
+
+          const beforeSrc=scenarioV40BestOrderEval(src,scenarioV39Customers(src.id),opts);
+          const beforeDst=scenarioV40BestOrderEval(dst,scenarioV39Customers(dst.id),opts);
+          s.routeId=null;s.seq=0;
+          const remain=scenarioV39Customers(src.id).filter(x=>x.id!==stopId);
+          const afterSrc=scenarioV40BestOrderEval(src,remain,opts);
+          let destIns=null;try{destIns=scenarioV33Insertion(s,dst,opts,false);}catch(e){destIns=null;}
+
+          let accept=false,save=0,lateDelta=0;
+          if(beforeSrc&&beforeDst&&afterSrc&&destIns){
+            const beforeMiles=(beforeSrc.sim.miles||0)+(beforeDst.sim.miles||0);
+            const afterMiles=(afterSrc.sim.miles||0)+(destIns.sim.miles||0);
+            save=beforeMiles-afterMiles;
+            const beforeLate=scenarioV34LateCount(beforeSrc.sim)+scenarioV34LateCount(beforeDst.sim);
+            const afterLate=scenarioV34LateCount(afterSrc.sim)+scenarioV34LateCount(destIns.sim);
+            lateDelta=afterLate-beforeLate;
+            const beforeWait=scenarioV34WaitMinutes(beforeSrc.sim)+scenarioV34WaitMinutes(beforeDst.sim);
+            const afterWait=scenarioV34WaitMinutes(afterSrc.sim)+scenarioV34WaitMinutes(destIns.sim);
+            // Use spare service headroom only when the mileage gain is meaningful.
+            accept=save>=2.0 && lateDelta<=service.headroom && afterWait<=beforeWait+Math.max(5,+opts.allowedWaitMinutes||5);
+          }
+
+          if(accept){
+            // Restore clean state, then commit the accepted pair once.
+            scenarioRestoreWorkingState(snap);
+            s=scenarioV34LiveStop(stopId);src=scenarioV34LiveRoute(source.id);dst=scenarioV34LiveRoute(destRef.id);
+            const srcOrder=scenarioV39Customers(src.id).filter(x=>x.id!==stopId);
+            s.routeId=null;s.seq=0;
+            const srcEv=scenarioV40BestOrderEval(src,srcOrder,opts);
+            let ins=null;try{ins=scenarioV33Insertion(s,dst,opts,false);}catch(e){ins=null;}
+            if(srcEv&&ins){
+              scenarioV40CommitOrder(src,srcEv);
+              if(scenarioV34CommitVerified(stopId,ins)){
+                accepted++;saved+=save;improved=true;stats.stopsReassigned=(stats.stopsReassigned||0)+1;
+                stats.relocationsAccepted=(stats.relocationsAccepted||0)+1;
+                service.headroom=Math.max(0,service.headroom-Math.max(0,lateDelta));
+              }else scenarioRestoreWorkingState(snap);
+            }else scenarioRestoreWorkingState(snap);
+          }else scenarioRestoreWorkingState(snap);
+
+          if(evaluated%6===0){
+            scenarioV39Progress('Rebalancing geographic territories…',`${evaluated} moves tested · ${accepted} accepted · ${scenarioFmt(saved,1)} miles removed`);
+            await scenarioV39Yield();
+          }
+        }
+      }
+    }
+    if(!improved)break;
+    await scenarioV41RouteMileagePolish(opts,stats,Math.min(deadline,performance.now()+15000));
+  }
+  stats.relocationsEvaluated=(stats.relocationsEvaluated||0)+evaluated;
+  stats.v41CrossRouteMoves=(stats.v41CrossRouteMoves||0)+accepted;
+  stats.v41CrossRouteMilesSaved=(stats.v41CrossRouteMilesSaved||0)+saved;
+  stats.v41MileagePasses=passes;
+  return {evaluated,accepted,saved,passes};
+}
+
+runScenarioModel=async function(){
+  if(scenarioV41Running){showToast('Scenario optimization is already running.');return;}
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
+  const overallStart=performance.now();
+  try{
+    const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+    if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+    scenarioV39Progress('Preparing V41 absolute optimization…',`Complete freight · ≥${scenarioFmt(opts.targetOnTimePct,1)}% on-time · geographic efficiency`);await scenarioV39Yield();
+    restoreScenarioBaseline();
+    stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+    scenarioBuildOptimizerBaselineSnapshot();
+    const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+    const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+    if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+    let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV39Build(opts);
+    const network={optimizer:'V41 freight/service/geographic async',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+
+    // Protect service with the V40 time-window-aware sequence first.
+    await scenarioV39SequenceAll(opts,null,network,'Building time-window-aware route sequence…');
+    await scenarioV40RepairService(opts,network,performance.now()+90000);
+
+    // Recover every remaining customer, including large atomic consolidated stops,
+    // by freeing capacity on a suitable route and re-homing smaller freight.
+    const recovery=await scenarioV41RecoverFreight(opts,network,90000);
+    if(recovery.direct||recovery.ejected){
+      await scenarioV39SequenceAll(opts,null,network,'Resequencing after freight recovery…');
+      await scenarioV40RepairService(opts,network,performance.now()+60000);
+    }
+
+    // Geographic efficiency gets a real search stage. It is allowed to consume
+    // service headroom above the absolute target, but never below the target.
+    const efficiencyDeadline=performance.now()+150000;
+    await scenarioV41RouteMileagePolish(opts,network,efficiencyDeadline);
+    if(performance.now()<efficiencyDeadline)await scenarioV41CrossRouteMileage(opts,network,efficiencyDeadline);
+    if(performance.now()<efficiencyDeadline)await scenarioV41RouteMileagePolish(opts,network,efficiencyDeadline);
+
+    let quality=scenarioV40NetworkQuality(opts);
+    if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline){
+      await scenarioV40RetireRoutes(opts,network,efficiencyDeadline);
+      await scenarioV41RouteMileagePolish(opts,network,efficiencyDeadline);
+    }
+    // Re-protect absolute service after mileage work if any service headroom was used.
+    quality=scenarioV40NetworkQuality(opts);
+    if(!quality.validService)await scenarioV40RepairService(opts,network,performance.now()+45000);
+
+    network.budgetExhausted=performance.now()>=efficiencyDeadline;network.runtimeSeconds=(performance.now()-overallStart)/1000;
+    network.v41Recovery=recovery;removed.networkAnalysis=network;removed.scratchBuild=scratch;
+
+    scenarioV39Progress('Validating V41 solution…','Checking freight, service, runtime, capacity, miles and route count');await scenarioV39Yield();
+    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],movedStops:network.stopsReassigned||0,v41:true};
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
+    if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=network.routesRetired||0;scratch.v41Recovery=recovery;}
+    const modeled=scenarioComputeModelMetrics(opts);const freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;
+    const serviceGate={target:opts.targetOnTimePct,actual:modeled.onTimePct,failed:modeled.onTimePct+1e-9<opts.targetOnTimePct};removed.absoluteServiceGate=serviceGate;
+    const finalQuality=scenarioV40NetworkQuality(opts);
+    let verdict={verdict:'ABSOLUTE QUALITY TARGET MET',freightRetentionPct:finalQuality.retention,onTimeDrop:0,waitIncrease:0,expenseIncrease:0};
+    if(!finalQuality.validFreight)verdict.verdict='FAILED — INCOMPLETE FREIGHT';
+    else if(!finalQuality.validFeasibility)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';
+    else if(!finalQuality.validService)verdict.verdict=`FAILED — SERVICE BELOW ${scenarioFmt(opts.targetOnTimePct,1)}% TARGET`;
+    else verdict.verdict='VALID SOLUTION — ABSOLUTE QUALITY TARGET MET';
+    const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V41 Freight-Service-Geographic Async Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
+  }catch(err){console.error('V41 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+};
+
+const scenarioV41ReportBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV41ReportBase(r);if(r?.optimizerVersion!=='V41 Freight-Service-Geographic Async Optimizer')return html;
+  const n=r.removed?.networkAnalysis||{},rec=n.v41Recovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95;
+  const marketGoalNote='Absolute target logic is independent of the imported route quality. Freight and service are hard quality gates; geographic mileage/route efficiency is optimized afterward.';
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:rgba(56,189,248,.7);"><h3>V41 Geographic Efficiency / Freight Recovery</h3><div class="scenario-help">${marketGoalNote} Lite ReOp is unchanged. V41 also removes V39/V40's oversized dormant-route penalty that could force geographically poor assignments.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${rec.initial||0} → ${rec.final||0}</div><div class="l">Unassigned Recovery</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v41RouteMilesSaved||0,1)}</div><div class="l">Intra-Route Miles Saved</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v41CrossRouteMilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}% Target</div></div></div><div class="scenario-note"><strong>Freight recovery:</strong> ${rec.direct||0} direct + ${rec.ejected||0} ejection-chain recovery(s) · <strong>Cross-route moves:</strong> ${n.v41CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Route-local sequence moves:</strong> ${n.v41RouteSequenceMoves||0} · <strong>Routes retired:</strong> ${n.routesRetired||0} · <strong>Optimizer runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+};
+
+</script>
 </body>
 </html>
