@@ -14164,5 +14164,238 @@ scenarioV27NetworkAnalysisHtml=function(r){
   return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V42 Geographic Seed-and-Grow Execution</h3><div class="scenario-help">Full Model now builds compact depot-based route territories before opening additional resources. Build-failed freight remains eligible for recovery. Freight and the absolute service target are hard gates before any mileage or route-retirement work. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.geographicSeeds||0}</div><div class="l">Geographic Route Seeds</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Seed/grow placements:</strong> ${s.geographicSeeds||0} seed + ${s.geographicGrowthPlacements||0} nearby growth · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated, ${scenarioFmt(n.v42CrossRouteMilesSaved||0,1)} mi saved · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
+
+<script>
+// ============================================================
+// V43 — SERVICE-BALANCED TERRITORY OPTIMIZER
+// ============================================================
+// Full Model / Build From Scratch only. Lite ReOp is intentionally untouched.
+// V42 proved compact territories reduce route count/hours, but it over-consolidated
+// routes before service compatibility was proven. V43 keeps the geographic idea
+// while pre-seeding enough territories for the workload, preserving route service
+// headroom during growth, and using each stop's source route only as a FEASIBILITY
+// fallback (never as an incumbent-quality assumption).
+
+let scenarioV43Running=false;
+
+function scenarioV43Clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+function scenarioV43AvgService(group){
+  const vals=(group||[]).map(s=>Math.max(1,stopServiceMinutes(s)||0)).filter(Number.isFinite).sort((a,b)=>a-b);
+  if(!vals.length)return 30;
+  // Trim extreme service-duration outliers so one unusual stop does not collapse
+  // the territory-count estimate.
+  const cut=Math.max(1,Math.floor(vals.length*.9));
+  const a=vals.slice(0,cut);return a.reduce((x,y)=>x+y,0)/a.length;
+}
+function scenarioV43DesiredRoutes(group,eligibleCount,opts){
+  const maxH=Math.max(6,+opts.maxRouteHours||14),avgSvc=scenarioV43AvgService(group);
+  // Reserve roughly half of route time for travel/window positioning. This makes
+  // territory count data-driven instead of hard-coding a market route count.
+  const serviceShare=.52;
+  const stopsPerRoute=scenarioV43Clamp((maxH*60*serviceShare)/Math.max(8,avgSvc),6,12);
+  const byStops=Math.ceil((group?.length||0)/stopsPerRoute);
+  // Add a small service headroom reserve for tight-window networks.
+  const tight=(group||[]).filter(s=>scenarioV42WindowWidth(s)<=240).length/Math.max(1,(group||[]).length);
+  const headroom=tight>.35?1.12:(tight>.18?1.07:1.03);
+  return Math.max(1,Math.min(eligibleCount,Math.ceil(byStops*headroom)));
+}
+function scenarioV43EligibleUnion(group,opts){
+  const map=new Map();
+  for(const s of (group||[])){
+    let rs=[];try{rs=scenarioV39EligibleRoutes(s,opts,'')||[];}catch(e){}
+    rs.forEach(r=>map.set(r.id,r));
+  }
+  return [...map.values()];
+}
+function scenarioV43AnchorPriority(s,dep){
+  const dist=dep?scenarioV42Distance(dep,s):0,cases=scenarioV32Cases(s)||0;
+  const tight=720/scenarioV42WindowWidth(s),svc=Math.max(0,stopServiceMinutes(s)||0);
+  // Large freight must be protected early; V42 allowed remote distance to dominate
+  // the 1,450-case stop. V43 makes demand + service difficulty first-class.
+  return cases*65000+svc*9000+tight*220000+dist*45000;
+}
+function scenarioV43SeedAnchors(group,count,dep){
+  const remaining=[...(group||[])],chosen=[];
+  if(!remaining.length||count<=0)return chosen;
+  remaining.sort((a,b)=>scenarioV43AnchorPriority(b,dep)-scenarioV43AnchorPriority(a,dep));
+  chosen.push(remaining.shift());
+  while(chosen.length<count&&remaining.length){
+    let bi=0,bv=-Infinity;
+    for(let i=0;i<remaining.length;i++){
+      const s=remaining[i];let sep=Infinity;
+      for(const c of chosen)sep=Math.min(sep,scenarioV42Distance(s,c));
+      const v=sep*85000+scenarioV43AnchorPriority(s,dep)*.28;
+      if(v>bv){bv=v;bi=i;}
+    }
+    chosen.push(remaining.splice(bi,1)[0]);
+  }
+  return chosen;
+}
+function scenarioV43CandidateServiceOK(cand,opts,buffer=1.0){
+  if(!cand?.sim)return false;
+  const s=scenarioV40Service(cand.sim),target=Math.max(50,+opts.targetOnTimePct||95),allowed=Math.max(0,+opts.allowedWaitMinutes||5);
+  return s.pct+1e-9>=Math.min(100,target+buffer)&&s.maxWait<=Math.max(allowed+3,8);
+}
+function scenarioV43PickSeedRoute(anchor,opts,usedRoutes){
+  let eligible=[];try{eligible=scenarioV39EligibleRoutes(anchor,opts,'')||[];}catch(e){}
+  // Feasibility fallback: if this stop was already carried by a source route,
+  // test that resource first while it is empty. This does NOT preserve its old
+  // territory; it only avoids declaring known-carried freight impossible.
+  const original=anchor.scenarioV43SourceRouteId?eligible.find(r=>r.id===anchor.scenarioV43SourceRouteId):null;
+  const ordered=[];
+  if(original&&!usedRoutes.has(original.id)&&!scenarioRouteHasCustomerWork(original.id))ordered.push(original);
+  eligible.filter(r=>!usedRoutes.has(r.id)&&!scenarioRouteHasCustomerWork(r.id)&&(!original||r.id!==original.id)).forEach(r=>ordered.push(r));
+  eligible.filter(r=>!usedRoutes.has(r.id)&&scenarioRouteHasCustomerWork(r.id)).forEach(r=>ordered.push(r));
+  let best=null,bv=Infinity;
+  for(const r of ordered){
+    let c=scenarioV42InsertionBase(anchor,r,opts,false)||scenarioV42InsertionBase(anchor,r,opts,true);if(!c)continue;
+    const svc=scenarioV40Service(c.sim),v=Math.max(0,(+opts.targetOnTimePct||95)-svc.pct)*2e9+svc.late*4e8+(c.sim.miles||0)*1e6+(c.sim.hours||0)*25000;
+    if(v<bv){bv=v;best=c;}
+  }
+  return best;
+}
+function scenarioV43GrowthCandidate(stop,route,opts,baseMiles){
+  const c=scenarioV42InsertionBase(stop,route,opts,false);if(!c)return null;
+  if(!scenarioV43CandidateServiceOK(c,opts,1.0))return null;
+  const svc=scenarioV40Service(c.sim),marg=Math.max(0,(c.sim.miles||0)-(baseMiles||0));
+  const affinity=scenarioV42RouteAffinity(route,stop);
+  // Among service-safe choices, geographic compactness and true marginal miles
+  // dominate. Route hours remain a secondary tie-breaker.
+  c._v43Score=marg*2.4e6+affinity*18000+(c.sim.hours||0)*12000+svc.wait*120000;
+  return c;
+}
+
+async function scenarioV43Build(opts){
+  const started=performance.now(),pool=scenarioV42BuildPool();
+  const stats={mode:'scratch',algorithm:'V43 service-balanced parallel territories',poolStops:pool.length,poolCases:pool.reduce((a,s)=>a+scenarioV32Cases(s),0),difficultFirstPlacements:0,initialPlacedStops:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,freightRecoveredCases:0,routesActivated:0,routesRetired:0,primaryBuildSeconds:0,recoverySeconds:0,routeTests:0,geographicSeeds:0,geographicGrowthPlacements:0,desiredSeedRoutes:0,serviceRejectedGrowth:0,completionBased:true,budgetExceeded:false};
+  pool.forEach(s=>{s.scenarioV43SourceRouteId=s.routeId||s.scenarioV43SourceRouteId||null;s.routeId=null;s.seq=0;if(/^Build From Scratch:/i.test(s.scenarioRemovedReason||''))s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+
+  const groups=new Map();for(const s of pool){const k=scenarioV42DepotKey(s,opts);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);}
+  let totalDone=0;
+  for(const [key,group] of groups){
+    const dep=scenarioV42DepotForKey(key,group),eligible=scenarioV43EligibleUnion(group,opts),desired=scenarioV43DesiredRoutes(group,eligible.length,opts);stats.desiredSeedRoutes+=desired;
+    const anchors=scenarioV43SeedAnchors(group,desired,dep),usedRoutes=new Set(),seededStops=new Set();
+    // Seed multiple territories FIRST. This prevents one route from consuming all
+    // geographically nearby freight before the network has enough service capacity.
+    for(const anchor of anchors){
+      const seed=scenarioV43PickSeedRoute(anchor,opts,usedRoutes);stats.routeTests++;
+      if(seed&&scenarioV34CommitVerified(anchor.id,seed)){
+        usedRoutes.add(seed.route.id);seededStops.add(anchor.id);stats.geographicSeeds++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;totalDone++;
+      }
+      scenarioV39Progress('Seeding service-balanced territories…',`${totalDone}/${pool.length} placed · target ${desired} territory route(s) for current depot`);await scenarioV39Yield();
+    }
+    let remaining=group.filter(s=>!seededStops.has(s.id)&&!s.routeId);
+    // Difficult freight first, but assign across ALL active territory routes in
+    // parallel instead of filling one route to exhaustion.
+    remaining.sort((a,b)=>scenarioV43AnchorPriority(b,dep)-scenarioV43AnchorPriority(a,dep));
+    for(const s of [...remaining]){
+      let active=eligible.filter(r=>scenarioRouteHasCustomerWork(r.id));
+      active.sort((a,b)=>scenarioV42RouteAffinity(a,s)-scenarioV42RouteAffinity(b,s));
+      let best=null,bestScore=Infinity;
+      for(const r of active.slice(0,Math.min(12,active.length))){
+        const base=scenarioV40BestOrderEval(r,scenarioV39Customers(r.id),opts),baseMiles=base?.sim?.miles||0;
+        const c=scenarioV43GrowthCandidate(s,r,opts,baseMiles);stats.routeTests++;
+        if(c&&c._v43Score<bestScore){bestScore=c._v43Score;best=c;}
+        else if(c===null)stats.serviceRejectedGrowth++;
+      }
+      if(!best){
+        // Open another territory only when existing territories cannot absorb the
+        // stop while preserving service headroom.
+        const seed=scenarioV43PickSeedRoute(s,opts,new Set(active.map(r=>r.id)));stats.routeTests++;
+        if(seed)best=seed;
+      }
+      if(best&&scenarioV34CommitVerified(s.id,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;stats.geographicGrowthPlacements++;totalDone++;}
+      if(totalDone%2===0){scenarioV39Progress('Growing service-compatible territories…',`${totalDone}/${pool.length} placed · ${routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length} active routes`);await scenarioV39Yield();}
+    }
+  }
+
+  // Full exhaustive completion before recovery.
+  let unplaced=pool.filter(s=>!s.routeId),processed=0;
+  for(const s of [...unplaced]){
+    const x=scenarioV39FindPlacement(s,opts,{relaxed:true,exhaustiveOnMiss:true});stats.routeTests+=(x.tested||0);
+    if(x.best&&scenarioV34CommitVerified(s.id,x.best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;}
+    processed++;if(processed%2===0){scenarioV39Progress('Completing all freight placement…',`${processed}/${unplaced.length} fallback stop(s) reviewed`);await scenarioV39Yield();}
+  }
+  unplaced=pool.filter(s=>!s.routeId);stats.primaryBuildSeconds=(performance.now()-started)/1000;stats.initialUnassigned=unplaced.length;
+  for(const s of unplaced){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: awaiting V43 freight recovery';}
+  stats.unassignedStops=unplaced.length;stats.unassignedCases=unplaced.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  return stats;
+}
+
+async function scenarioV43ServiceRepair(opts,stats,budgetMs=180000){
+  const end=performance.now()+budgetMs;let before=scenarioV40NetworkQuality(opts),rounds=0;
+  while(performance.now()<end&&!before.validService&&rounds<5){
+    rounds++;
+    await scenarioV40RepairService(opts,stats,Math.min(end,performance.now()+45000));
+    await scenarioV39SequenceAll(opts,Math.min(end,performance.now()+30000),stats,'Re-sequencing after service repair…');
+    const after=scenarioV40NetworkQuality(opts);
+    if(after.m.onTimePct<=before.m.onTimePct+0.05)break;
+    before=after;
+  }
+  stats.v43ServiceRepairRounds=rounds;return before;
+}
+
+runScenarioModel=async function(){
+  if(scenarioV43Running){showToast('Scenario optimization is already running.');return;}
+  if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
+  scenarioV43Running=true;scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
+  const overallStart=performance.now();
+  try{
+    const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
+    if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
+    scenarioV39Progress('Preparing V43 service-balanced optimization…',`100% freight · ≥${scenarioFmt(opts.targetOnTimePct,1)}% on-time · then routes/miles/hours`);await scenarioV39Yield();
+    restoreScenarioBaseline();
+    stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
+    scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
+    const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
+    if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
+
+    let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV43Build(opts);
+    const network={optimizer:'V43 service-balanced geographic async',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+
+    await scenarioV39SequenceAll(opts,null,network,'Optimizing service-aware sequence…');
+    let recovery=await scenarioV42RecoverFreight(opts,network,210000);
+    if(recovery.direct||recovery.ejected)await scenarioV39SequenceAll(opts,null,network,'Resequencing recovered freight…');
+    let quality=scenarioV40NetworkQuality(opts);
+    if(quality.validFreight&&!quality.validService)quality=await scenarioV43ServiceRepair(opts,network,210000);
+
+    // Efficiency only after BOTH absolute gates pass. Unlike V42, route retirement
+    // is attempted before cross-route polish so a complete service-safe solution can
+    // find the efficient fleet size first; every accepted change is still globally gated.
+    const efficiencyDeadline=performance.now()+240000;
+    if(quality.validFreight&&quality.validFeasibility&&quality.validService){
+      await scenarioV41RouteMileagePolish(opts,network,Math.min(efficiencyDeadline,performance.now()+50000));
+      quality=scenarioV40NetworkQuality(opts);
+      if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline)await scenarioV40RetireRoutes(opts,network,Math.min(efficiencyDeadline,performance.now()+70000));
+      if(performance.now()<efficiencyDeadline)await scenarioV42CrossRouteMileage(opts,network,efficiencyDeadline);
+      if(performance.now()<efficiencyDeadline)await scenarioV41RouteMileagePolish(opts,network,efficiencyDeadline);
+    }
+    quality=scenarioV40NetworkQuality(opts);
+    if(quality.validFreight&&!quality.validService)quality=await scenarioV43ServiceRepair(opts,network,90000);
+
+    network.budgetExhausted=performance.now()>=efficiencyDeadline;network.runtimeSeconds=(performance.now()-overallStart)/1000;network.v42Recovery=recovery;removed.networkAnalysis=network;removed.scratchBuild=scratch;
+    scenarioV39Progress('Validating V43 solution…','Checking complete freight, absolute service target, runtime/capacity and efficiency');await scenarioV39Yield();
+    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],redistributedStops:network.stopsReassigned||0,v43:true};
+    removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
+    if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=network.routesRetired||0;scratch.v42Recovery=recovery;}
+    const modeled=scenarioComputeModelMetrics(opts),freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;
+    const serviceGate={target:opts.targetOnTimePct,actual:modeled.onTimePct,failed:modeled.onTimePct+1e-9<opts.targetOnTimePct};removed.absoluteServiceGate=serviceGate;
+    const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'ABSOLUTE QUALITY TARGET MET',freightRetentionPct:finalQuality.retention,onTimeDrop:0,waitIncrease:0,expenseIncrease:0};
+    if(!finalQuality.validFreight)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if(!finalQuality.validFeasibility)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if(!finalQuality.validService)verdict.verdict=`FAILED — SERVICE BELOW ${scenarioFmt(opts.targetOnTimePct,1)}% TARGET`;else verdict.verdict='VALID SOLUTION — ABSOLUTE QUALITY TARGET MET';
+    const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V43 Service-Balanced Territory Absolute-Quality Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
+  }catch(err){console.error('V43 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+};
+
+const scenarioV43ReportBase=scenarioV27NetworkAnalysisHtml;
+scenarioV27NetworkAnalysisHtml=function(r){
+  const html=scenarioV43ReportBase(r);if(r?.optimizerVersion!=='V43 Service-Balanced Territory Absolute-Quality Optimizer')return html;
+  const n=r.removed?.networkAnalysis||{},s=r.removed?.scratchBuild||{},rec=n.v42Recovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V43 Service-Balanced Territory Execution</h3><div class="scenario-help">V43 pre-seeds enough geographic territories for the workload before growing routes, preserves service headroom during every growth insertion, protects large/difficult freight early, and uses the imported route only as a feasibility fallback for a stop that the source data already proved can be carried. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.geographicSeeds||0}/${s.desiredSeedRoutes||0}</div><div class="l">Actual / Planned Territory Seeds</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Service-rejected growth trials:</strong> ${(s.serviceRejectedGrowth||0).toLocaleString()} · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Service repair rounds:</strong> ${n.v43ServiceRepairRounds||0} · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+};
+</script>
 </body>
 </html>
