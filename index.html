@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - Scenario Analysis v17 Baseline-Preserving</title>
+<title>RouteER - V47 Bounded Service Repair / V44 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -14601,7 +14601,7 @@ runScenarioModel=async function(){
     const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'VALID SOLUTION — ABSOLUTE QUALITY TARGET MET',freightRetentionPct:finalQuality.retention,onTimeDrop:0,waitIncrease:0,expenseIncrease:0};
     if(!finalQuality.validFreight)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if(!finalQuality.validFeasibility)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if(!finalQuality.validService)verdict.verdict=`FAILED — SERVICE BELOW ${scenarioFmt(opts.targetOnTimePct,1)}% TARGET`;
     const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
-    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V44 Target-Budget Efficiency Optimizer',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V46 Rollback - V44 Stable Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
     scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
   }catch(err){console.error('V44 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
   finally{scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
@@ -14609,234 +14609,107 @@ runScenarioModel=async function(){
 
 const scenarioV44ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
-  const html=scenarioV44ReportBase(r);if(r?.optimizerVersion!=='V44 Target-Budget Efficiency Optimizer')return html;
+  const html=scenarioV44ReportBase(r);if(r?.optimizerVersion!=='V46 Rollback - V44 Stable Foundation')return html;
   const n=r.removed?.networkAnalysis||{},s=r.removed?.scratchBuild||{},rec=n.v42Recovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V44 Target-Budget Efficiency Execution</h3><div class="scenario-help">V44 corrects the V43 objective mismatch: service is a hard floor, not an unlimited reward. Once a route is inside the service tolerance, marginal miles and geographic compactness dominate. Wait inside the configured allowance can be used when it improves routing efficiency. Large source-proven freight is reserved before normal territory growth. Lite ReOp remains unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.megaFreightReserved||0}</div><div class="l">Large Freight Reserved</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Route tests:</strong> ${(s.routeTests||0).toLocaleString()} · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Sequence improvements:</strong> ${n.localSequenceMoves||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V46 Rollback — V44 Stable Foundation</h3><div class="scenario-help">V46 is a clean rollback to the V44 target-budget optimization engine after the V45 geometry/sequence experiment regressed mileage and route efficiency. No V45 geometry cleanup, outlier exchange, or V45 2-opt layer is active. Lite ReOp remains unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${s.megaFreightReserved||0}</div><div class="l">Large Freight Reserved</div></div><div class="scenario-kpi"><div class="v">${n.routesRetired||0}</div><div class="l">Routes Retired</div></div></div><div class="scenario-note"><strong>Primary placements:</strong> ${s.initialPlacedStops||0}/${s.poolStops||0} · <strong>Route tests:</strong> ${(s.routeTests||0).toLocaleString()} · <strong>Freight recovery:</strong> ${rec.initial||0} → ${rec.final||0} (${rec.direct||0} direct, ${rec.ejected||0} ejection) · <strong>Cross-route mileage:</strong> ${n.v42CrossRouteMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Sequence improvements:</strong> ${n.localSequenceMoves||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
+// V46 rollback branch: optimizer execution intentionally matches V44 logic.
+// V45 route-geometry/sequence-cleanup changes are not included in this file.
 </script>
+
 
 <script>
 // ============================================================
-// V45 — ROUTE GEOMETRY + SEQUENCE CLEANUP
+// V47 — BOUNDED SERVICE REPAIR ON THE V44 FOUNDATION
 // ============================================================
-// Full Model / Build From Scratch only. Lite ReOp is intentionally untouched.
-// V44 proved the network can reach a much better mileage/hour envelope, but map
-// review still exposed long spokes, criss-crossing legs, and isolated outliers.
-// V45 preserves V44 as the construction foundation and adds a bounded geometry
-// layer: stronger 2-opt route sequencing, route-shape diagnostics, and safe
-// neighbor-route exchanges. Freight, capacity/runtime and the absolute network
-// service target remain hard acceptance gates for the geometry phase.
+// V44 scratch construction is intentionally frozen. V47 adds only a guarded
+// post-build service-repair checkpoint and a second freight-recovery attempt.
+// Lite ReOp is not changed.
+let scenarioV47Running=false;
 
-let scenarioV45Running=false;
-
-function scenarioV45CustomerLatLng(s){
-  const lat=+s?.lat,lng=+s?.lng;return Number.isFinite(lat)&&Number.isFinite(lng)?{lat,lng}:null;
-}
-function scenarioV45Centroid(customers){
-  const pts=(customers||[]).map(scenarioV45CustomerLatLng).filter(Boolean);if(!pts.length)return null;
-  return {lat:pts.reduce((a,p)=>a+p.lat,0)/pts.length,lng:pts.reduce((a,p)=>a+p.lng,0)/pts.length};
-}
-function scenarioV45RouteShape(route){
-  const cs=scenarioV39Customers(route.id).filter(s=>scenarioV45CustomerLatLng(s));
-  const centroid=scenarioV45Centroid(cs);if(!centroid||!cs.length)return {count:cs.length,avgRadius:0,maxRadius:0,stretch:0};
-  const radii=cs.map(s=>haversine(centroid.lat,centroid.lng,+s.lat,+s.lng));
-  const avgRadius=radii.reduce((a,b)=>a+b,0)/radii.length,maxRadius=Math.max(...radii,0);
-  const sim=scenarioRouteRuntime(route)||{};
-  // A dimensionless diagnostic: large when a route has long spokes relative to
-  // the footprint of its assigned customers.
-  const footprint=Math.max(1,maxRadius*2,avgRadius*3);
-  return {count:cs.length,avgRadius,maxRadius,stretch:Math.max(0,(+sim.miles||0)/footprint)};
-}
-function scenarioV45RouteSnapshot(routeIds){
-  const ids=new Set(routeIds||[]),rows=[];
-  for(const s of stops){if(ids.has(s.routeId))rows.push({id:s.id,routeId:s.routeId,seq:s.seq});}
-  const rr=routes.filter(r=>ids.has(r.id)).map(r=>({id:r.id,scenarioDispatchEpoch:r.scenarioDispatchEpoch,earliestStartTime:r.earliestStartTime}));
-  return {rows,rr};
-}
-function scenarioV45RestoreSnapshot(snap,routeIds){
-  const ids=new Set(routeIds||[]),known=new Set((snap?.rows||[]).map(x=>x.id));
-  // Any stop newly moved into one of the snapshotted routes is put back to its
-  // pre-trial assignment when present in the snapshot map below.
-  const map=new Map((snap?.rows||[]).map(x=>[x.id,x]));
-  for(const s of stops){
-    const old=map.get(s.id);if(old){s.routeId=old.routeId;s.seq=old.seq;}
-    else if(ids.has(s.routeId)&&!known.has(s.id)){s.routeId=null;s.seq=0;}
-  }
-  for(const rs of snap?.rr||[]){const r=routes.find(x=>x.id===rs.id);if(r){r.scenarioDispatchEpoch=rs.scenarioDispatchEpoch;r.earliestStartTime=rs.earliestStartTime;}}
-}
-function scenarioV45NetworkAcceptable(opts){
-  const q=scenarioV40NetworkQuality(opts);return q.validFreight&&q.validFeasibility&&q.validService;
-}
-function scenarioV45RouteService(sim){return scenarioV40Service(sim||{});}
-
-async function scenarioV45TwoOptRoute(route,opts,stats,{maxTrials=90,requireNetworkGate=false}={}){
-  if(!route||scenarioRouteIsProtectedLongHaul(route))return 0;
-  let cs=scenarioV39Customers(route.id).sort((a,b)=>(a.seq||0)-(b.seq||0));if(cs.length<4)return 0;
-  let best=scenarioV44BestDispatch(route,cs,opts,{relaxed:true,fine:true,floor:scenarioV44LocalFloor(opts)});if(!best)return 0;
-  let moves=0,trials=0,improved=true;
-  while(improved&&trials<maxTrials){
-    improved=false;
-    const n=cs.length;
-    // Longer reversals first remove obvious crossings/spokes more effectively
-    // than adjacent swaps alone.
-    for(let span=Math.min(n-1,8);span>=2&&!improved&&trials<maxTrials;span--){
-      for(let i=0;i+span<n&&trials<maxTrials;i++){
-        const j=i+span,cand=cs.slice();cand.splice(i,j-i+1,...cand.slice(i,j+1).reverse());
-        const ev=scenarioV44BestDispatch(route,cand,opts,{relaxed:true,fine:false,floor:scenarioV44LocalFloor(opts)});trials++;stats.v45TwoOptTrials=(stats.v45TwoOptTrials||0)+1;
-        if(!ev)continue;
-        const curSvc=scenarioV45RouteService(best.sim),newSvc=scenarioV45RouteService(ev.sim);
-        // While the network is below target, never sacrifice local service.
-        // Once service is valid, mileage can improve as long as network gates survive.
-        if(!scenarioV45NetworkAcceptable(opts)&&newSvc.pct+1e-9<curSvc.pct)continue;
-        const milesGain=(best.sim.miles||0)-(ev.sim.miles||0),hoursGain=(best.sim.hours||0)-(ev.sim.hours||0);
-        const betterService=newSvc.late<curSvc.late||newSvc.pct>curSvc.pct+0.01;
-        if(!(milesGain>0.05||betterService||(Math.abs(milesGain)<=0.05&&hoursGain>0.02)))continue;
-        const snap=scenarioV45RouteSnapshot([route.id]);
-        scenarioV40CommitOrder(route,ev);
-        if(requireNetworkGate&&!scenarioV45NetworkAcceptable(opts)){scenarioV45RestoreSnapshot(snap,[route.id]);continue;}
-        best=ev;cs=cand;moves++;improved=true;stats.localSequenceMoves=(stats.localSequenceMoves||0)+1;stats.v45TwoOptAccepted=(stats.v45TwoOptAccepted||0)+1;break;
-      }
-    }
-    if(moves%2===0)await scenarioV39Yield();
-  }
-  return moves;
-}
-
-function scenarioV45OutlierCandidates(){
-  const arr=[];
-  for(const r of routes.filter(x=>scenarioRouteHasCustomerWork(x.id))){
-    const cs=scenarioV39Customers(r.id),cent=scenarioV45Centroid(cs);if(!cent||cs.length<3)continue;
-    const dists=cs.map(s=>({s,d:haversine(cent.lat,cent.lng,+s.lat,+s.lng)})).filter(x=>Number.isFinite(x.d)).sort((a,b)=>b.d-a.d);
-    const med=dists.length?dists[Math.floor(dists.length/2)].d:0;
-    for(const x of dists.slice(0,Math.min(4,dists.length))){if(x.d>Math.max(8,med*1.55))arr.push({route:r,stop:x.s,d:x.d,ratio:med?x.d/med:99});}
-  }
-  return arr.sort((a,b)=>b.ratio-a.ratio||b.d-a.d);
-}
-function scenarioV45NearestRoutes(stop,excludeId,limit=5){
-  const pt=scenarioV45CustomerLatLng(stop);if(!pt)return [];
-  return routes.filter(r=>r.id!==excludeId&&scenarioRouteHasCustomerWork(r.id)&&scenarioCanTargetRoute(stop,r,scenarioReadOptions()))
-    .map(r=>{const c=scenarioV45Centroid(scenarioV39Customers(r.id));return {r,d:c?haversine(pt.lat,pt.lng,c.lat,c.lng):Infinity};})
-    .sort((a,b)=>a.d-b.d).slice(0,limit).map(x=>x.r);
-}
-
-async function scenarioV45GeometryCleanup(opts,network,deadline){
-  const stats={routesReviewed:0,twoOptMoves:0,outliersReviewed:0,exchangeTrials:0,exchangeAccepted:0,milesSaved:0,shapeBefore:0,shapeAfter:0};
-  const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id));
-  stats.shapeBefore=active.reduce((a,r)=>a+scenarioV45RouteShape(r).stretch,0);
-  // Phase 1: strong within-route 2-opt before changing route ownership.
-  for(let i=0;i<active.length;i++){
-    if(performance.now()>=deadline)break;stats.routesReviewed++;
-    stats.twoOptMoves+=await scenarioV45TwoOptRoute(active[i],opts,network,{maxTrials:110,requireNetworkGate:scenarioV45NetworkAcceptable(opts)});
-    if(i%2===1){scenarioV39Progress('Removing route crossings and backtracking…',`${i+1}/${active.length} routes · ${stats.twoOptMoves} geometry improvements`);await scenarioV39Yield();}
-  }
-  // Phase 2: move isolated outliers only when total NETWORK miles improve and all
-  // absolute gates remain satisfied. This attacks the long-spoke shapes visible on map.
-  if(scenarioV45NetworkAcceptable(opts)){
-    const outliers=scenarioV45OutlierCandidates();
-    for(let oi=0;oi<outliers.length&&performance.now()<deadline;oi++){
-      const {route:src,stop}=outliers[oi];if(stop.routeId!==src.id)continue;stats.outliersReviewed++;
-      const beforeMetrics=scenarioComputeModelMetrics(opts),targets=scenarioV45NearestRoutes(stop,src.id,5);
-      let accepted=false;
-      for(const tgt of targets){
-        if(performance.now()>=deadline)break;stats.exchangeTrials++;network.relocationsEvaluated=(network.relocationsEvaluated||0)+1;
-        const snap=scenarioV45RouteSnapshot([src.id,tgt.id]);
-        const cand=scenarioV44Insertion(stop,tgt,opts,false);if(!cand)continue;
-        if(!scenarioV44Commit(stop,cand)){scenarioV45RestoreSnapshot(snap,[src.id,tgt.id]);continue;}
-        // Rebuild both affected sequences before evaluating the exchange.
-        await scenarioV45TwoOptRoute(src,opts,network,{maxTrials:45,requireNetworkGate:false});
-        await scenarioV45TwoOptRoute(tgt,opts,network,{maxTrials:45,requireNetworkGate:false});
-        const afterMetrics=scenarioComputeModelMetrics(opts);
-        const valid=scenarioV45NetworkAcceptable(opts);
-        const gain=(beforeMetrics.miles||0)-(afterMetrics.miles||0);
-        if(valid&&gain>0.5){
-          stats.exchangeAccepted++;stats.milesSaved+=gain;network.relocationsAccepted=(network.relocationsAccepted||0)+1;network.stopsReassigned=(network.stopsReassigned||0)+1;accepted=true;break;
-        }
-        scenarioV45RestoreSnapshot(snap,[src.id,tgt.id]);
-      }
-      if(oi%3===2){scenarioV39Progress('Cleaning route territories…',`${stats.outliersReviewed} outliers reviewed · ${stats.exchangeAccepted} moved · ${scenarioFmt(stats.milesSaved,1)} mi saved`);await scenarioV39Yield();}
-      if(accepted)continue;
-    }
-  }
-  stats.shapeAfter=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).reduce((a,r)=>a+scenarioV45RouteShape(r).stretch,0);
-  network.v45Geometry=stats;return stats;
-}
-
-async function scenarioV45ForceSourceProvenFreight(opts,network){
-  const unassigned=stops.filter(s=>s.sourceType==='route-data'&&!s.routeId&&!scenarioIsFixedRouteAnchor(s));
-  let recovered=0,reviewed=0;
-  for(const s of unassigned){
-    reviewed++;let best=null;
-    // Exhaust every eligible route, but source-proven route receives first attempt.
-    const eligible=scenarioV39EligibleRoutes(s,opts,'');
-    const sourceId=s.scenarioV43SourceRouteId||scenarioOriginalRouteId(s);
-    const ordered=[...eligible].sort((a,b)=>(a.id===sourceId?-1:0)-(b.id===sourceId?-1:0)||scenarioV39CheapRouteScore(a,s)-scenarioV39CheapRouteScore(b,s));
-    for(const r of ordered){const c=scenarioV44Insertion(s,r,opts,true);if(c&&(!best||c.score<best.score))best=c;}
-    if(scenarioV44Commit(s,best))recovered++;
-    await scenarioV39Yield();
-  }
-  network.v45SourceFreight={reviewed,recovered,remaining:stops.filter(s=>s.sourceType==='route-data'&&!s.routeId&&!scenarioIsFixedRouteAnchor(s)).length};
-  return network.v45SourceFreight;
+async function scenarioV47BoundedServiceRepair(opts,stats,budgetMs=210000,mileageBudgetPct=5){
+  const beforeQ=scenarioV40NetworkQuality(opts), beforeM=scenarioComputeModelMetrics(opts);
+  const snap=scenarioSnapshotWorkingState();
+  const startMiles=+beforeM.miles||0, target=+opts.targetOnTimePct||95;
+  const maxMiles=startMiles*(1+Math.max(0,mileageBudgetPct)/100);
+  stats.v47ServiceBefore=beforeM.onTimePct||0; stats.v47MilesBefore=startMiles; stats.v47MileageBudgetPct=mileageBudgetPct;
+  await scenarioV43ServiceRepair(opts,stats,budgetMs);
+  const afterM=scenarioComputeModelMetrics(opts), afterQ=scenarioV40NetworkQuality(opts);
+  const serviceGain=(afterM.onTimePct||0)-(beforeM.onTimePct||0);
+  const withinMiles=(+afterM.miles||0)<=maxMiles+0.01;
+  const noFreightLoss=(afterQ.retention||0)+1e-9>=(beforeQ.retention||0);
+  const accept=noFreightLoss && afterQ.validFeasibility && serviceGain>0.05 && withinMiles;
+  if(!accept)scenarioRestoreWorkingState(snap);
+  const finalM=accept?afterM:beforeM;
+  stats.v47ServiceRepairAccepted=accept?1:0;stats.v47ServiceGain=accept?serviceGain:0;stats.v47ServiceAfter=finalM.onTimePct||0;stats.v47MilesAfter=finalM.miles||0;
+  stats.v47RepairRejectedReason=accept?'':(!noFreightLoss?'freight loss':(!afterQ.validFeasibility?'capacity/runtime':(!withinMiles?'mileage budget':'no meaningful service gain')));
+  return scenarioV40NetworkQuality(opts);
 }
 
 runScenarioModel=async function(){
-  if(scenarioV45Running){showToast('Scenario optimization is already running.');return;}
+  if(scenarioV47Running||scenarioV44Running){showToast('Scenario optimization is already running.');return;}
   if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
-  scenarioV45Running=true;scenarioV44Running=true;scenarioV43Running=true;scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
+  scenarioV47Running=true;scenarioV44Running=true;scenarioV43Running=true;scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
   const overallStart=performance.now();
   try{
     const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
     if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
-    scenarioV39Progress('Preparing V45 route-geometry optimization…',`V44 efficient build · freight/service repair · 2-opt geometry cleanup · ≥${scenarioFmt(opts.targetOnTimePct,1)}% service`);await scenarioV39Yield();
+    scenarioV39Progress('Preparing V47 bounded service repair…',`V44 efficiency foundation · freight recovery · service repair capped at +5% miles · target ≥${scenarioFmt(opts.targetOnTimePct,1)}%`);await scenarioV39Yield();
     restoreScenarioBaseline();
     stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
     scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
     const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
     if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
     let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV44Build(opts);
-    const network={optimizer:'V45 route geometry + sequence cleanup',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
-    await scenarioV44SequenceAll(opts,network,'Sequencing V45 foundation routes…',false);
+    const network={optimizer:'V47 bounded service repair on V44 foundation',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+
+    // Preserve V44 construction/sequence behavior exactly.
+    await scenarioV44SequenceAll(opts,network,'Sequencing V44 efficiency foundation…',false);
     let recovery=await scenarioV42RecoverFreight(opts,network,240000);
-    const sourceFallback=await scenarioV45ForceSourceProvenFreight(opts,network);
-    if(recovery.direct||recovery.ejected||sourceFallback.recovered)await scenarioV44SequenceAll(opts,network,'Resequencing recovered freight…',false);
-    // Service repair is attempted regardless of freight-gate state so one difficult
-    // unassigned customer cannot suppress time-window cleanup for the other 463 stops.
-    let quality=scenarioV40NetworkQuality(opts);
-    if(!quality.validService)quality=await scenarioV43ServiceRepair(opts,network,240000);
-    const efficiencyDeadline=performance.now()+360000;
-    // V45 geometry operates once the absolute gates are valid.
-    quality=scenarioV40NetworkQuality(opts);
-    let geometry=null;
-    if(quality.validFreight&&quality.validFeasibility&&quality.validService){
-      geometry=await scenarioV45GeometryCleanup(opts,network,efficiencyDeadline);
+    if(recovery.direct||recovery.ejected)await scenarioV44SequenceAll(opts,network,'Resequencing recovered freight…',false);
+
+    // V46 skipped service repair whenever freight was 95.9%. V47 repairs service
+    // anyway, but commits it only when it improves service without exceeding +5% miles.
+    let quality=await scenarioV47BoundedServiceRepair(opts,network,210000,5);
+
+    // A service-aware resequence can open insertion capacity/time opportunities.
+    // Retry only the unresolved freight after the guarded repair.
+    const recovery2=await scenarioV42RecoverFreight(opts,network,150000);
+    if(recovery2.direct||recovery2.ejected){
+      await scenarioV44SequenceAll(opts,network,'Resequencing after second freight recovery…',true);
       quality=scenarioV40NetworkQuality(opts);
-      if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline)await scenarioV40RetireRoutes(opts,network,efficiencyDeadline);
-      if(performance.now()<efficiencyDeadline){
-        await scenarioV45GeometryCleanup(opts,network,efficiencyDeadline);
-        await scenarioV44SequenceAll(opts,network,'Final V45 route-shape polish…',true);
-      }
     }
-    quality=scenarioV40NetworkQuality(opts);if(!quality.validService)quality=await scenarioV43ServiceRepair(opts,network,120000);
+    network.v47SecondRecovery=recovery2;
+
+    // Only run V44 efficiency cleanup after the absolute gates are genuinely met.
+    const efficiencyDeadline=performance.now()+180000;
+    if(quality.validFreight&&quality.validFeasibility&&quality.validService){
+      await scenarioV44SequenceAll(opts,network,'Final V47 mileage polish…',true);
+      quality=scenarioV40NetworkQuality(opts);
+      if(quality.validFreight&&quality.validFeasibility&&quality.validService&&performance.now()<efficiencyDeadline)await scenarioV42CrossRouteMileage(opts,network,efficiencyDeadline);
+    }
+
     network.budgetExhausted=performance.now()>=efficiencyDeadline;network.runtimeSeconds=(performance.now()-overallStart)/1000;network.v42Recovery=recovery;removed.networkAnalysis=network;removed.scratchBuild=scratch;
-    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],redistributedStops:network.stopsReassigned||0,v45:true};
+    removed.consolidation={routesReviewed:network.retirementReviewed||0,retiredRoutes:network.routesRetired||0,retired:network.retiredRoutes||[],redistributedStops:network.stopsReassigned||0,v47:true};
     removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
     if(scratch){scratch.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;scratch.routesRetired=network.routesRetired||0;scratch.v42Recovery=recovery;}
-    const modeled=scenarioComputeModelMetrics(opts),freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;removed.absoluteServiceGate={target:opts.targetOnTimePct,actual:modeled.onTimePct,failed:modeled.onTimePct+1e-9<opts.targetOnTimePct};
+    const modeled=scenarioComputeModelMetrics(opts),freightGate=scenarioV39FreightGate(original,modeled);removed.freightIntegrityGate=freightGate;
+    removed.absoluteServiceGate={target:opts.targetOnTimePct,actual:modeled.onTimePct,failed:modeled.onTimePct+1e-9<opts.targetOnTimePct};
     const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'VALID SOLUTION — ABSOLUTE QUALITY TARGET MET',freightRetentionPct:finalQuality.retention,onTimeDrop:0,waitIncrease:0,expenseIncrease:0};
     if(!finalQuality.validFreight)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if(!finalQuality.validFeasibility)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if(!finalQuality.validService)verdict.verdict=`FAILED — SERVICE BELOW ${scenarioFmt(opts.targetOnTimePct,1)}% TARGET`;
     const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
-    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V45 Route Geometry & Sequence Cleanup',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V47 Bounded Service Repair - V44 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
     scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
-  }catch(err){console.error('V45 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
-  finally{scenarioV45Running=false;scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+  }catch(err){console.error('V47 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV47Running=false;scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
 };
 
-const scenarioV45ReportBase=scenarioV27NetworkAnalysisHtml;
+const scenarioV47ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
-  const html=scenarioV45ReportBase(r);if(r?.optimizerVersion!=='V45 Route Geometry & Sequence Cleanup')return html;
-  const n=r.removed?.networkAnalysis||{},g=n.v45Geometry||{},sf=n.v45SourceFreight||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(239,68,68,.7)'};"><h3>V45 Route Geometry & Sequence Cleanup</h3><div class="scenario-help">V45 preserves the V44 freight/mileage foundation and adds an explicit route-shape layer: bounded 2-opt segment reversals remove crossings/backtracking, isolated route outliers are tested against neighboring territories, and every accepted cross-route geometry move must reduce total network miles while preserving freight, capacity/runtime and the absolute service target. Lite ReOp remains unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${g.twoOptMoves||0}</div><div class="l">Route Geometry Moves</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(g.milesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Source-proven freight fallback:</strong> ${sf.recovered||0}/${sf.reviewed||0} recovered · <strong>2-opt trials / accepted:</strong> ${(n.v45TwoOptTrials||0).toLocaleString()} / ${n.v45TwoOptAccepted||0} · <strong>Outliers reviewed:</strong> ${g.outliersReviewed||0} · <strong>Neighbor-route exchanges:</strong> ${g.exchangeAccepted||0}/${g.exchangeTrials||0} · <strong>Shape index:</strong> ${scenarioFmt(g.shapeBefore||0,2)} → ${scenarioFmt(g.shapeAfter||0,2)} · <strong>Total optimizer runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  const html=scenarioV47ReportBase(r);if(r?.optimizerVersion!=='V47 Bounded Service Repair - V44 Foundation')return html;
+  const n=r.removed?.networkAnalysis||{},rec=n.v42Recovery||{},rec2=n.v47SecondRecovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V47 Bounded Service Repair — V44 Foundation</h3><div class="scenario-help">V47 freezes the successful V44 scratch/efficiency foundation. It adds only a checkpointed service-repair pass capped at +5% network miles and a second freight-recovery attempt after service-aware resequencing. A repair that exceeds the mileage budget, loses freight, or creates a hard feasibility failure is rolled back. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${n.v47ServiceRepairAccepted?'YES':'NO'}</div><div class="l">Service Repair Committed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v47MilesBefore||0,1)} → ${scenarioFmt(n.v47MilesAfter||0,1)}</div><div class="l">Repair Miles Checkpoint</div></div></div><div class="scenario-note"><strong>Service checkpoint:</strong> ${scenarioFmt(n.v47ServiceBefore||0,1)}% → ${scenarioFmt(n.v47ServiceAfter||0,1)}% · <strong>Allowed mileage growth:</strong> ${scenarioFmt(n.v47MileageBudgetPct||5,1)}%${n.v47RepairRejectedReason?` · <strong>Repair rollback reason:</strong> ${escapeHtml(n.v47RepairRejectedReason)}`:''} · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
-
 </body>
 </html>
