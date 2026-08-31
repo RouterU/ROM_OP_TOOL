@@ -448,6 +448,18 @@ body{background:var(--bg0);color:var(--text1);}
 }
 </style>
 
+
+<style>
+/* V50 app-wide workflow enhancements */
+.left-panel{transition:width .2s ease;}
+.left-panel.expanded-workspace{width:min(760px,68vw);}
+.workspace-expand-btn{padding:2px 7px!important;font-size:9px!important;}
+.manifest-row.stop.manifest-selected{background:rgba(207,69,32,.22)!important;box-shadow:inset 4px 0 0 var(--accent),inset 0 0 0 1px rgba(207,69,32,.55);}
+.manifest-selection-bar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:0 0 10px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px;background:var(--bg3);}
+.manifest-selection-bar .count{font-size:10px;font-weight:800;color:var(--accent);margin-right:auto;}
+.manifest-selection-bar select{background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text1);font-size:10px;font-family:'Sora',sans-serif;padding:4px 6px;min-width:180px;}
+@media (max-width:900px){.left-panel.expanded-workspace{width:min(86vw,760px);}}
+</style>
 </head>
 <body>
 
@@ -551,6 +563,7 @@ body{background:var(--bg0);color:var(--text1);}
       <div class="quadrant" id="q-routes" style="flex:1;min-height:120px;">
         <div class="q-header">
           <span class="q-title">Routes</span>
+          <button class="btn workspace-expand-btn" id="routes-expand-btn" onclick="toggleWorkspacePanelExpand('routes')" title="Expand the route and unassigned workspace into the map">→ Expand Window</button>
           <button class="btn warn" style="padding:2px 7px;font-size:9px;" onclick="unassignAllCustomerStopsFromRoutes()" title="Move every currently assigned non-depot stop from all routes to Unassigned">Unassign All Stops</button>
           <button class="btn" style="padding:2px 7px;font-size:9px;" onclick="showSelectedRoutesOnMap()">Show Selected</button>
           <input id="route-number-filter" class="route-number-filter" type="search" list="route-number-options" placeholder="Route Number" title="Select or enter a Route Number (UDFNumber1)" oninput="setRouteNumberFilter(this.value)"/>
@@ -579,6 +592,7 @@ body{background:var(--bg0);color:var(--text1);}
       <div class="quadrant" id="q-ua" style="flex:1;min-height:100px;">
         <div class="q-header">
           <span class="q-title">Unassigned Stops</span>
+          <button class="btn workspace-expand-btn" id="ua-expand-btn" onclick="toggleWorkspacePanelExpand('ua')" title="Expand the route and unassigned workspace into the map">→ Expand Window</button>
           <div style="display:flex;gap:5px;align-items:center;">
             <button class="btn success" id="assign-potential-btn" style="display:none;padding:2px 7px;font-size:9px;" onclick="assignToPotentialRoutes()">Assign to Potential Routes</button>
             <input id="order-route-filter" class="order-route-filter" type="search" list="order-route-options" placeholder="Standard Route" title="Select or enter an order Standard Route" oninput="setOrderRouteFilter(this.value)"/>
@@ -626,7 +640,7 @@ body{background:var(--bg0);color:var(--text1);}
       <select id="travel-model-select" class="map-layer-toggle" onchange="setTravelModel(this.value)" title="Adjust travel time estimates by vehicle type">
         <option value="standard">Standard</option>
         <option value="straight">Straight Truck</option>
-        <option value="semi">Semi-Trailer</option>
+        <option value="semi" selected>Semi-Trailer</option>
       </select>
       <span class="map-drop-hint">Drag routes/stops here to display</span>
     </div>
@@ -841,6 +855,7 @@ body{background:var(--bg0);color:var(--text1);}
   <div class="modal manifest-modal">
     <h2 id="manifest-title">Route Manifest</h2>
     <div id="manifest-stats" class="manifest-stats"></div>
+    <div id="manifest-selection-actions"></div>
     <div id="manifest-list" class="manifest-route-list"></div>
     <div class="modal-actions">
       <button class="btn warn" onclick="unassignAllStopsFromManifest()">Unassign All Stops</button>
@@ -1078,11 +1093,13 @@ const visibleRouteIds=new Set();
 const visibleDepotIds=new Set();
 let importedDepotsVisible=true;
 let activeManifestRouteId=null, activeDetailStopId=null, activeDetailRouteId=null, manifestDragStopId=null;
+let manifestSelectedStopIds=new Set();
+let workspacePanelExpanded=false;
 let pendingOptimizationMode='selected';
 let appTab='routing', importMode='all', pendingWB=null;
 let dragState=null, map, markers={}, polylines={}, roadPolylines={}, expanded=new Set();
 let routeLinesVisible=true;
-let travelModel='standard';
+let travelModel='semi';
 let darkTileLayer=null, satelliteTileLayer=null, currentMapLayer='dark';
 let contextStopId=null;
 let potColors={}; // stopId -> color
@@ -2120,7 +2137,7 @@ function renderUA(){
       <span class="ua-dot" style="background:${pc||'var(--text3)'}"></span>
       <div class="ua-info">
         <div class="ua-name">${customerNameWithCutIdBadges(s,s.customerName)}${s.lockStart?'<span class="tag tag-pref">START LOCK</span>':''}${s.lockFinal?'<span class="tag tag-pref">FINAL LOCK</span>':''}${hasPref?'<span class="tag tag-pref">&#11088; Pref</span>':''}${isWC?'<span class="tag tag-wc">Will Call</span>':''}</div>
-        <div class="ua-detail">${orderLabel(s)} &middot; ${tCases(s)}cs &middot; ${s.city||''} ${s.state||''}${pc?`<span class="tag-pot" style="background:${pc};margin-left:4px;">&#128204; Suggested</span>`:''}</div>
+        <div class="ua-detail">${orderLabel(s)} &middot; ${tCases(s)}cs &middot; ${s.city||''} ${s.state||''}${pc?`<span class="tag-pot" style="background:${pc};margin-left:4px;">&#128204; Suggested - ${escapeHtml((routes.find(r=>r.id===potRouteSuggestions[s.id])?.udfNumber1||routes.find(r=>r.id===potRouteSuggestions[s.id])?.name||'Route').toString())}</span>`:''}</div>
       </div>
       <select class="ua-assign" onclick="event.stopPropagation()" onchange="assignStop('${s.id}',this.value);this.value=''">
         <option value="">Assign&hellip;</option>
@@ -2301,6 +2318,22 @@ function updateAssignPotentialButton(){
 }
 
 // ============================================================
+// EXPANDED ROUTING WORKSPACE
+// ============================================================
+function updateWorkspaceExpandButtons(){
+  const label=workspacePanelExpanded?'← Collapse Window':'→ Expand Window';
+  ['routes-expand-btn','ua-expand-btn'].forEach(id=>{const btn=document.getElementById(id);if(btn)btn.textContent=label;});
+}
+function toggleWorkspacePanelExpand(source){
+  workspacePanelExpanded=!workspacePanelExpanded;
+  const panel=document.getElementById('left-panel');
+  if(panel)panel.classList.toggle('expanded-workspace',workspacePanelExpanded);
+  updateWorkspaceExpandButtons();
+  setTimeout(()=>{if(map&&map.invalidateSize)map.invalidateSize();},230);
+  showToast(workspacePanelExpanded?'Routing workspace expanded':'Routing workspace restored');
+}
+
+// ============================================================
 // UI ACTIONS
 // ============================================================
 function switchAppTab(t){
@@ -2370,6 +2403,20 @@ function reseq(){
   routes.forEach(r=>applyStartFinalLocksToRoute(r.id));
 }
 
+// Distance resequence used after drag/drop assignment. Routing-backup routes
+// (All Templates / Orders Only) also preserve imported preferred sequence locks.
+function resequenceRouteAfterDrop(routeId){
+  const route=routes.find(r=>r.id===routeId);
+  if(!route)return;
+  if(route.sourceType==='route-data'){
+    resequnceRouteByDistance(routeId);
+  }else{
+    resequenceRoutesDistanceThenPreferredPositions([routeId]);
+    expanded.add(routeId);
+    render();
+  }
+}
+
 // Drag & drop
 function onRouteDragStart(e,routeId){
   const draggedRoute=routes.find(r=>r.id===routeId);
@@ -2390,7 +2437,16 @@ function onDropStop(e,tid,tRoute){
   if(!dragState)return;
   const s=stops.find(x=>x.id===dragState.sid);const t=stops.find(x=>x.id===tid);
   if(!s||!t||s.id===t.id)return;
-  s.routeId=tRoute;
+  const oldRouteId=s.routeId;
+  if(oldRouteId!==tRoute){
+    s.routeId=tRoute;
+    s.seq=Math.max(0,...stops.filter(x=>x.routeId===tRoute&&x.id!==s.id).map(x=>x.seq||0))+1;
+    if(oldRouteId)resequenceRouteAfterDrop(oldRouteId);
+    resequenceRouteAfterDrop(tRoute);
+    render();
+    showToast('Stop moved and route resequenced by distance');
+    return;
+  }
   const tmp=s.seq;s.seq=t.seq;t.seq=tmp;
   reseq();render();showToast('Stop moved');
 }
@@ -2398,9 +2454,12 @@ function dropOnRoute(e,rid){
   e.preventDefault();
   if(!dragState||dragState.routeId||dragState.routeIds)return;
   const s=stops.find(x=>x.id===dragState.sid);if(!s)return;
+  const oldRouteId=s.routeId;
   s.routeId=rid;
-  s.seq=Math.max(0,...stops.filter(x=>x.routeId===rid&&x.id!==s.id).map(x=>x.seq))+1;
-  reseq();render();showToast('Stop added to route');
+  s.seq=Math.max(0,...stops.filter(x=>x.routeId===rid&&x.id!==s.id).map(x=>x.seq||0))+1;
+  if(oldRouteId&&oldRouteId!==rid)resequenceRouteAfterDrop(oldRouteId);
+  resequenceRouteAfterDrop(rid);
+  render();showToast('Stop added and route resequenced by distance');
 }
 function dropOnMap(e){
   e.preventDefault();
@@ -2866,8 +2925,8 @@ function handleMarkerDropOnRouteLine(stopId,latlng){
   const oldRouteId=stop.routeId;
   stop.routeId=targetRouteId;
   insertStopAfterClosestStop(stop,targetRouteId,latlng);
-  if(oldRouteId)reseq();
-  reseq();
+  if(oldRouteId&&oldRouteId!==targetRouteId)resequenceRouteAfterDrop(oldRouteId);
+  resequenceRouteAfterDrop(targetRouteId);
   visibleRouteIds.add(targetRouteId);
   visibleStopIds.add(stop.id);
   expanded.add(targetRouteId);
@@ -3686,6 +3745,7 @@ function highlightRoute(routeId){
 // ============================================================
 function openRouteManifest(routeId){
   activeManifestRouteId=routeId;
+  manifestSelectedStopIds.clear();
   expanded.add(routeId);
   renderRouteManifest();
   document.getElementById('route-manifest-modal').style.display='flex';
@@ -3721,6 +3781,7 @@ function renderRouteManifest(){
     <div class="manifest-stat"><div class="val">${data.miles.toFixed(1)}</div><div class="lbl">Miles</div></div>
     <div class="manifest-stat"><div class="val">${cleanTimeValue(data.start)||'—'}</div><div class="lbl">Start Time</div></div>
     <div class="manifest-stat"><div class="val">${cleanTimeValue(data.end)||'—'}</div><div class="lbl">Stop Time</div></div>`;
+  renderManifestSelectionActions();
 
   const capacityWarningHtml=routeCapacityWarningHtml(activeManifestRouteId);
   const timeline=routeTimelineRows(activeManifestRouteId);
@@ -3736,6 +3797,7 @@ function renderRouteManifest(){
     const displayName=isDepot?name:`#${escapeHtml(seqDisplay)} · ${cutIdBadgesForStop(s)}${name}${lockBadge}`;
     const detail=isDepot?`LocationKey: ${escapeHtml(pt.depot?.locationKey||'')}`:`${escapeHtml(orderLabel(s))} · ${escapeHtml(s.address||'')} ${escapeHtml(s.city||'')} ${escapeHtml(s.state||'')}`;
     const violationClass=pt.twStatus==='LATE'?' tw-violation':'';
+    const selectedClass=!isDepot&&manifestSelectedStopIds.has(s.id)?' manifest-selected':'';
     const twClass=pt.twStatus==='LATE'?'tw-late':(pt.twStatus==='WAIT'?'tw-wait':'tw-ok');
     const dragAttrs=isDepot?'':`id="manifest-stop-${s.id}" draggable="true"
       ondragstart="manifestDragStart(event,'${s.id}')"
@@ -3743,12 +3805,12 @@ function renderRouteManifest(){
       ondragleave="manifestDragLeave(event)"
       ondrop="manifestDrop(event,'${s.id}')"
       ondragend="manifestDragEnd()"
-      onclick="toggleStopFilter('${s.id}')"
+      onclick="manifestStopRowClick(event,'${s.id}')"
       onmouseenter="highlightStop('${s.id}')" onmouseleave="clearMapHighlight()"`;
     const customerCell=isDepot
       ? `<div class="manifest-customer"><div class="manifest-name">${displayName}</div><div class="manifest-detail">${detail}</div></div>`
-      : `<div class="manifest-customer" onclick="event.stopPropagation();openStopDetail('${s.id}')" title="Click to view consolidated orders" style="cursor:pointer;"><div class="manifest-name">${displayName}</div><div class="manifest-detail">${detail}</div></div>`;
-    return `<div class="manifest-row ${isDepot?'depot':'stop'}${violationClass}" ${dragAttrs}>
+      : `<div class="manifest-customer" onclick="manifestCustomerCellClick(event,'${s.id}')" title="Click for details; Ctrl-click to multi-select" style="cursor:pointer;"><div class="manifest-name">${displayName}</div><div class="manifest-detail">${detail}</div></div>`;
+    return `<div class="manifest-row ${isDepot?'depot':'stop'}${violationClass}${selectedClass}" ${dragAttrs}>
       <div class="manifest-seq">${seq}</div>
       ${customerCell}
       <div>${escapeHtml(pt.city||'')} ${escapeHtml(pt.state||'')}</div>
@@ -3771,6 +3833,60 @@ function renderRouteManifest(){
     <div class="manifest-row header"><div>Seq</div><div>Stop / Customer</div><div>City</div><div>Cases</div><div>Weight</div><div>Cube</div><div>Leg Mi</div><div>Drive</div><div>Service</div><div>Arrive</div><div>Depart</div><div>Wait</div><div>Window</div><div>Status</div></div>
     ${rows || '<div class="manifest-row"><div>—</div><div>No assigned stops</div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div></div>'}`;
 }
+function manifestStopRowClick(e,stopId){
+  if(e&&(e.ctrlKey||e.metaKey)){
+    e.preventDefault();e.stopPropagation();
+    if(manifestSelectedStopIds.has(stopId))manifestSelectedStopIds.delete(stopId);else manifestSelectedStopIds.add(stopId);
+    renderRouteManifest();
+    return;
+  }
+  toggleStopFilter(stopId);
+}
+function manifestCustomerCellClick(e,stopId){
+  if(e&&(e.ctrlKey||e.metaKey)){manifestStopRowClick(e,stopId);return;}
+  e.stopPropagation();openStopDetail(stopId);
+}
+function renderManifestSelectionActions(){
+  const el=document.getElementById('manifest-selection-actions');if(!el)return;
+  const valid=[...manifestSelectedStopIds].filter(id=>stops.some(s=>s.id===id&&s.routeId===activeManifestRouteId));
+  manifestSelectedStopIds=new Set(valid);
+  if(!valid.length){el.innerHTML='<div style="font-size:9px;color:var(--text3);margin:0 0 8px;">Ctrl-click stops to select multiple rows for bulk actions.</div>';return;}
+  el.innerHTML=`<div class="manifest-selection-bar">
+    <span class="count">${valid.length} stop${valid.length===1?'':'s'} selected</span>
+    <select id="manifest-bulk-route"><option value="">Move to route...</option>${routes.filter(r=>r.id!==activeManifestRouteId).map(r=>`<option value="${r.id}">${escapeHtml(routeDisplayName(r))}</option>`).join('')}</select>
+    <button class="btn primary" onclick="manifestMoveSelectedStops()">Move</button>
+    <button class="btn warn" onclick="manifestUnassignSelectedStops()">Unassign</button>
+    <button class="btn" style="background:#ef4444;border-color:#ef4444;color:#fff;" onclick="manifestRemoveSelectedStops()">Remove From Session</button>
+    <button class="btn" onclick="manifestClearSelection()">Clear Selection</button>
+  </div>`;
+}
+function manifestClearSelection(){manifestSelectedStopIds.clear();renderRouteManifest();}
+function manifestMoveSelectedStops(){
+  const targetRouteId=document.getElementById('manifest-bulk-route')?.value||'';
+  if(!targetRouteId){showToast('Choose a destination route first');return;}
+  const ids=[...manifestSelectedStopIds];
+  if(!ids.length)return;
+  const sourceRouteId=activeManifestRouteId;
+  let nextSeq=Math.max(0,...stops.filter(s=>s.routeId===targetRouteId).map(s=>s.seq||0));
+  ids.forEach(id=>{const s=stops.find(x=>x.id===id);if(s){s.routeId=targetRouteId;s.seq=++nextSeq;s.uiChecked=false;}});
+  manifestSelectedStopIds.clear();
+  resequenceRouteAfterDrop(sourceRouteId);resequenceRouteAfterDrop(targetRouteId);
+  render();renderRouteManifest();showToast(`${ids.length} stop(s) moved and routes resequenced`);
+}
+function manifestUnassignSelectedStops(){
+  const ids=[...manifestSelectedStopIds];if(!ids.length)return;
+  ids.forEach(id=>{const s=stops.find(x=>x.id===id);if(s){s.routeId=null;s.seq=0;s.uiChecked=false;}});
+  manifestSelectedStopIds.clear();resequenceRouteAfterDrop(activeManifestRouteId);render();renderRouteManifest();showToast(`${ids.length} stop(s) unassigned`);
+}
+function manifestRemoveSelectedStops(){
+  const ids=[...manifestSelectedStopIds];if(!ids.length)return;
+  if(!confirm(`Remove ${ids.length} selected stop${ids.length===1?'':'s'} from this routing session?`))return;
+  const idSet=new Set(ids);
+  ids.forEach(id=>{visibleStopIds.delete(id);delete potColors[id];delete potRouteSuggestions[id];if(markers[id]){try{map.removeLayer(markers[id]);}catch(e){}delete markers[id];}});
+  stops=stops.filter(s=>!idSet.has(s.id));manifestSelectedStopIds.clear();
+  resequenceRouteAfterDrop(activeManifestRouteId);render();renderRouteManifest();showToast(`${ids.length} stop(s) removed from session`);
+}
+
 function manifestDragStart(e,stopId){
   manifestDragStopId=stopId;
   document.getElementById('manifest-stop-'+stopId)?.classList.add('dragging');
@@ -4069,8 +4185,8 @@ function assignToPotentialRoutes(){
   let resequencedRoutes=0;
   affectedRoutes.forEach(routeId=>{
     expanded.add(routeId);
-    const result=resequnceRouteByDistance(routeId);
-    if(result.ok)resequencedRoutes++;
+    resequenceRouteAfterDrop(routeId);
+    resequencedRoutes++;
   });
 
   suggested.forEach(s=>{
