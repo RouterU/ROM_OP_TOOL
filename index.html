@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V53 Full Deterministic Pipeline / V51 Live Tracking</title>
+<title>RouteER - V54 Surgical Freight Recovery / V53 Deterministic Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -14824,7 +14824,7 @@ const scenarioV47ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
   const html=scenarioV47ReportBase(r);if(r?.optimizerVersion!=='V47 Bounded Service Repair - V44 Foundation')return html;
   const n=r.removed?.networkAnalysis||{},rec=n.v42Recovery||{},rec2=n.v47SecondRecovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V47 Bounded Service Repair — V44 Foundation</h3><div class="scenario-help">V47 freezes the successful V44 scratch/efficiency foundation. It adds only a checkpointed service-repair pass capped at +5% network miles and a second freight-recovery attempt after service-aware resequencing. A repair that exceeds the mileage budget, loses freight, or creates a hard feasibility failure is rolled back. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${n.v47ServiceRepairAccepted?'YES':'NO'}</div><div class="l">Service Repair Committed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v47MilesBefore||0,1)} → ${scenarioFmt(n.v47MilesAfter||0,1)}</div><div class="l">Repair Miles Checkpoint</div></div></div><div class="scenario-note"><strong>Service checkpoint:</strong> ${scenarioFmt(n.v47ServiceBefore||0,1)}% → ${scenarioFmt(n.v47ServiceAfter||0,1)}% · <strong>Allowed mileage growth:</strong> ${scenarioFmt(n.v47MileageBudgetPct||5,1)}%${n.v47RepairRejectedReason?` · <strong>Repair rollback reason:</strong> ${escapeHtml(n.v47RepairRejectedReason)}`:''} · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V47 Bounded Service Repair — V44 Foundation</h3><div class="scenario-help">V47 freezes the successful V44 scratch/efficiency foundation. It adds only a checkpointed service-repair pass capped at +5% network miles and a second freight-recovery attempt after service-aware resequencing. A repair that exceeds the mileage budget, loses freight, or creates a hard feasibility failure is rolled back. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${n.v47ServiceRepairAccepted?'YES':'NO'}</div><div class="l">Service Repair Committed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v47MilesBefore||0,1)} → ${scenarioFmt(n.v47MilesAfter||0,1)}</div><div class="l">Repair Miles Checkpoint</div></div></div><div class="scenario-note"><strong>Service checkpoint:</strong> ${scenarioFmt(n.v47ServiceBefore||0,1)}% → ${scenarioFmt(n.v47ServiceAfter||0,1)}% · <strong>Allowed mileage growth:</strong> ${scenarioFmt(n.v47MileageBudgetPct||5,1)}%${n.v47RepairRejectedReason?` · <strong>Repair rollback reason:</strong> ${escapeHtml(n.v47RepairRejectedReason)}`:''} · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>V54 surgical recovery:</strong> ${n.v54Recovery?.remainingBefore||0} → ${n.v54Recovery?.remainingAfter||0}${n.v54Recovery?.rolledBack?` (ROLLED BACK: ${escapeHtml(n.v54Recovery.reason||'guardrail')})`:` (${n.v54Recovery?.direct||0} direct, ${n.v54Recovery?.ejection||0} ejection; ${scenarioFmt(n.v54Recovery?.addedMiles||0,1)} mi)`} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
 
@@ -15247,6 +15247,253 @@ scenarioV44DispatchStarts=scenarioV53DispatchStarts;
 scenarioV44BestDispatch=scenarioV53BestDispatch;
 scenarioV44Insertion=scenarioV53Insertion;
 
+
+// ============================================================
+// V54 — SURGICAL FREIGHT RECOVERY ON TOP OF V53
+// ============================================================
+// V54 deliberately does NOT change the V53 scratch constructor or mileage
+// optimizer. It only adds a checkpointed, deterministic recovery pass for the
+// largest remaining unassigned stop(s) AFTER the mileage solution is built.
+// A recovery is committed only when it:
+//   1) improves freight retention,
+//   2) preserves hard capacity/runtime feasibility,
+//   3) keeps service within the existing mileage-first floor, and
+//   4) does not add more than a bounded amount of network mileage.
+// If no safe recovery exists, the entire V53 solution is restored unchanged.
+
+function scenarioV54StableStopSort(a,b){
+  const ca=scenarioV32Cases(a),cb=scenarioV32Cases(b);
+  if(Math.abs(cb-ca)>1e-9)return cb-ca;
+  return scenarioV53CmpKey(a,b,scenarioV53StopKey);
+}
+function scenarioV54SmallEjectCandidates(routeId,targetId,maxCount=8){
+  return scenarioV39Customers(routeId)
+    .filter(s=>s.id!==targetId&&!scenarioIsFixedRouteAnchor(s))
+    .slice()
+    .sort((a,b)=>{
+      const ca=scenarioV32Cases(a),cb=scenarioV32Cases(b);
+      if(Math.abs(ca-cb)>1e-9)return ca-cb;
+      return scenarioV53CmpKey(a,b,scenarioV53StopKey);
+    })
+    .slice(0,maxCount);
+}
+function scenarioV54TryDirectTarget(target,opts){
+  let best=null;
+  const eligible=scenarioV39EligibleRoutes(target,opts,'')
+    .slice()
+    .sort((a,b)=>{
+      const d=scenarioV42RouteAffinity(a,target)-scenarioV42RouteAffinity(b,target);
+      return Math.abs(d)>1e-7?d:scenarioV53CmpKey(a,b,scenarioV53RouteKey);
+    });
+
+  for(const route of eligible){
+    const cand=scenarioV53Insertion(target,route,opts,true);
+    if(!cand)continue;
+    if(!best ||
+       cand.score<best.score-1e-7 ||
+       (Math.abs(cand.score-best.score)<=1e-7 &&
+        scenarioV53CmpKey(cand.route,best.route,scenarioV53RouteKey)<0)){
+      best=cand;
+    }
+  }
+  return best;
+}
+function scenarioV54TryOneEjection(target,opts,serviceFloor,retentionFloor,milesBefore,maxAddedMiles){
+  let bestSolution=null;
+  const eligible=scenarioV39EligibleRoutes(target,opts,'')
+    .filter(r=>scenarioRouteHasCustomerWork(r.id))
+    .slice()
+    .sort((a,b)=>{
+      const d=scenarioV42RouteAffinity(a,target)-scenarioV42RouteAffinity(b,target);
+      return Math.abs(d)>1e-7?d:scenarioV53CmpKey(a,b,scenarioV53RouteKey);
+    })
+    .slice(0,16);
+
+  for(const destRef of eligible){
+    const ejectRefs=scenarioV54SmallEjectCandidates(destRef.id,target.id,8);
+    for(const ejectRef of ejectRefs){
+      const snap=scenarioSnapshotWorkingState();
+      const targetLive=scenarioV34LiveStop(target.id);
+      const ejectLive=scenarioV34LiveStop(ejectRef.id);
+      const dest=scenarioV34LiveRoute(destRef.id);
+      if(!targetLive||!ejectLive||!dest){
+        scenarioRestoreWorkingState(snap);continue;
+      }
+
+      // Temporarily free one small customer from the target route.
+      ejectLive.routeId=null;ejectLive.seq=0;
+
+      const targetCand=scenarioV53Insertion(targetLive,dest,opts,true);
+      if(!targetCand){
+        scenarioRestoreWorkingState(snap);continue;
+      }
+      if(!scenarioV44Commit(targetLive,targetCand)){
+        scenarioRestoreWorkingState(snap);continue;
+      }
+
+      // Re-home the ejected customer deterministically to the best feasible route.
+      const eNow=scenarioV34LiveStop(ejectRef.id);
+      let ejectBest=null;
+      const ejectRoutes=scenarioV39EligibleRoutes(eNow,opts,dest.id)
+        .slice()
+        .sort((a,b)=>{
+          const d=scenarioV42RouteAffinity(a,eNow)-scenarioV42RouteAffinity(b,eNow);
+          return Math.abs(d)>1e-7?d:scenarioV53CmpKey(a,b,scenarioV53RouteKey);
+        });
+      for(const r of ejectRoutes){
+        const c=scenarioV53Insertion(eNow,r,opts,true);
+        if(c && (!ejectBest ||
+          c.score<ejectBest.score-1e-7 ||
+          (Math.abs(c.score-ejectBest.score)<=1e-7 &&
+           scenarioV53CmpKey(c.route,ejectBest.route,scenarioV53RouteKey)<0))){
+          ejectBest=c;
+        }
+      }
+      if(!ejectBest || !scenarioV44Commit(eNow,ejectBest)){
+        scenarioRestoreWorkingState(snap);continue;
+      }
+
+      const q=scenarioV40NetworkQuality(opts);
+      const m=scenarioComputeModelMetrics(opts);
+      const added=(+m.miles||0)-milesBefore;
+      const valid=q.validFeasibility &&
+        q.retention+1e-9>=retentionFloor &&
+        (+m.onTimePct||0)+1e-9>=serviceFloor &&
+        added<=maxAddedMiles+1e-9;
+
+      if(valid){
+        const candidateSnapshot=scenarioSnapshotWorkingState();
+        const score=added*1e6+(+m.hours||0)*1000-(+m.onTimePct||0)*10;
+        if(!bestSolution || score<bestSolution.score-1e-7){
+          bestSolution={
+            score,
+            snapshot:candidateSnapshot,
+            miles:+m.miles||0,
+            hours:+m.hours||0,
+            onTime:+m.onTimePct||0,
+            retention:+q.retention||0,
+            targetRouteId:dest.id,
+            ejectedStopId:ejectRef.id
+          };
+        }
+      }
+      scenarioRestoreWorkingState(snap);
+    }
+  }
+  return bestSolution;
+}
+async function scenarioV54RecoverRemainingFreight(opts,network,serviceFloor){
+  const checkpoint=scenarioSnapshotWorkingState();
+  const beforeMetrics=scenarioComputeModelMetrics(opts);
+  const beforeQuality=scenarioV40NetworkQuality(opts);
+  const missing=scenarioV39Pool().filter(s=>!s.routeId).slice().sort(scenarioV54StableStopSort);
+
+  const result={
+    attempted:missing.length,
+    recovered:0,
+    direct:0,
+    ejection:0,
+    rolledBack:false,
+    reason:'',
+    beforeMiles:+beforeMetrics.miles||0,
+    afterMiles:+beforeMetrics.miles||0,
+    addedMiles:0,
+    beforeRetention:+beforeQuality.retention||0,
+    afterRetention:+beforeQuality.retention||0,
+    remainingBefore:missing.length,
+    remainingAfter:missing.length,
+    targetStops:missing.map(s=>({id:s.id,name:s.customerName||s.locationKey||s.id,cases:scenarioV32Cases(s)}))
+  };
+  if(!missing.length)return result;
+
+  // This cap is intentionally conservative. The manual test showed the large
+  // stop can be absorbed with a relatively small mileage impact, so V54 will
+  // not sacrifice the successful V53 mileage solution for an expensive recovery.
+  const maxAddedMiles=Math.min(150,Math.max(50,(+beforeMetrics.miles||0)*0.025));
+  const requiredRetention=Math.min(100,Math.max(+beforeQuality.retention||0,
+    scenarioV39FreightGate(
+      scenarioLastRun?.original||scenarioBaseline?.metrics||beforeMetrics,
+      {...beforeMetrics,shippedCases:(+beforeMetrics.shippedCases||0)+missing.reduce((a,s)=>a+scenarioV32Cases(s),0)}
+    ).pct||100
+  ));
+
+  for(const ref of missing){
+    scenarioV39Progress(
+      'Recovering remaining freight safely…',
+      `${scenarioFmt(scenarioV32Cases(ref),0)} cases · direct insertion first · then one-stop ejection if needed`
+    );
+    await scenarioV39Yield();
+
+    const live=scenarioV34LiveStop(ref.id);
+    if(!live||live.routeId)continue;
+
+    // 1) Try a normal direct insertion first.
+    const direct=scenarioV54TryDirectTarget(live,opts);
+    if(direct){
+      const snap=scenarioSnapshotWorkingState();
+      if(scenarioV44Commit(live,direct)){
+        const q=scenarioV40NetworkQuality(opts),m=scenarioComputeModelMetrics(opts);
+        const added=(+m.miles||0)-result.beforeMiles;
+        if(q.validFeasibility &&
+           q.retention>result.beforeRetention+1e-9 &&
+           (+m.onTimePct||0)+1e-9>=serviceFloor &&
+           added<=maxAddedMiles+1e-9){
+          result.recovered++;result.direct++;
+          continue;
+        }
+      }
+      scenarioRestoreWorkingState(snap);
+    }
+
+    // 2) If direct placement fails, permit ONE small-stop ejection/rehome chain.
+    const targetRetention=Math.min(100,result.beforeRetention+
+      (scenarioV32Cases(ref)/Math.max(1,(scenarioLastRun?.original?.shippedCases||scenarioBaseline?.metrics?.shippedCases||35743))*100)-0.02);
+    const ejected=scenarioV54TryOneEjection(
+      live,opts,serviceFloor,targetRetention,result.beforeMiles,maxAddedMiles
+    );
+    if(ejected){
+      scenarioRestoreWorkingState(ejected.snapshot);
+      result.recovered++;result.ejection++;
+    }
+  }
+
+  // Resequence only if recovery actually succeeded.
+  if(result.recovered){
+    await scenarioV44SequenceAll(opts,network,'Resequencing recovered freight…',false);
+  }
+
+  const finalQ=scenarioV40NetworkQuality(opts);
+  const finalM=scenarioComputeModelMetrics(opts);
+  const remaining=scenarioV39Pool().filter(s=>!s.routeId);
+  result.afterMiles=+finalM.miles||0;
+  result.addedMiles=result.afterMiles-result.beforeMiles;
+  result.afterRetention=+finalQ.retention||0;
+  result.remainingAfter=remaining.length;
+
+  // Final all-or-nothing safety gate. If the targeted pass did anything harmful,
+  // restore the exact V53 checkpoint.
+  if(result.afterRetention<=result.beforeRetention+1e-9){
+    result.rolledBack=true;result.reason='no freight-retention improvement';
+  }else if(!finalQ.validFeasibility){
+    result.rolledBack=true;result.reason='capacity/runtime feasibility';
+  }else if((+finalM.onTimePct||0)+1e-9<serviceFloor){
+    result.rolledBack=true;result.reason='service guardrail';
+  }else if(result.addedMiles>maxAddedMiles+1e-9){
+    result.rolledBack=true;result.reason='mileage cap';
+  }
+
+  if(result.rolledBack){
+    scenarioRestoreWorkingState(checkpoint);
+    result.recovered=0;result.direct=0;result.ejection=0;
+    result.afterMiles=result.beforeMiles;result.addedMiles=0;
+    result.afterRetention=result.beforeRetention;
+    result.remainingAfter=result.remainingBefore;
+  }
+
+  result.maxAddedMiles=maxAddedMiles;
+  return result;
+}
+
 runScenarioModel=async function(){
   if(scenarioV49Running||scenarioV44Running){showToast('Scenario optimization is already running.');return;}
   if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
@@ -15255,14 +15502,14 @@ runScenarioModel=async function(){
   try{
     const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
     if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
-    scenarioV39Progress('Preparing V53 fully deterministic optimization…','Deterministic V44 construction · deterministic 2,000-candidate mileage search');await scenarioV39Yield();
+    scenarioV39Progress('Preparing V54 safe improvement pass…','V53 deterministic foundation · mileage optimizer unchanged · surgical freight recovery with rollback');await scenarioV39Yield();
     restoreScenarioBaseline();
     stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
     scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
     const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
     if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
     let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV53Build(opts);
-    const network={optimizer:'V53 deterministic V44 + V49 mileage pipeline',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+    const network={optimizer:'V54 surgical freight recovery on V53 deterministic mileage foundation',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
 
     // Freeze the successful V44 construction behavior.
     await scenarioV44SequenceAll(opts,network,'Sequencing V44 efficiency foundation…',false);
@@ -15283,6 +15530,13 @@ runScenarioModel=async function(){
     const recovery2=await scenarioV42RecoverFreight(opts,network,120000);network.v48SecondRecovery=recovery2;
     if(recovery2.direct||recovery2.ejected)await scenarioV44SequenceAll(opts,network,'Resequencing recovered freight…',false);
 
+    // V54: do not touch the successful V53 construction/mileage logic.
+    // Only after that solution is complete do we attempt a bounded recovery of
+    // any remaining freight, with a full rollback to the V53 checkpoint if the
+    // recovery harms feasibility, service, or mileage beyond the conservative cap.
+    const v54Recovery=await scenarioV54RecoverRemainingFreight(opts,network,serviceFloor);
+    network.v54Recovery=v54Recovery;
+
     network.budgetExhausted=!!mileage.budgetReached;network.runtimeSeconds=(performance.now()-overallStart)/1000;network.v42Recovery=recovery;removed.networkAnalysis=network;removed.scratchBuild=scratch;
     removed.consolidation={routesReviewed:0,retiredRoutes:0,retired:[],redistributedStops:network.stopsReassigned||0,v48:true};
     removed.runtimeViolations=scenarioValidateRouteRuntimeLimits(opts);removed.capacityViolations=scenarioValidateCapacityLimits();removed.waitReview=scenarioCountWaitViolations(opts);removed.targetedRepair=null;
@@ -15292,7 +15546,7 @@ runScenarioModel=async function(){
     const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'MILEAGE-FIRST SOLUTION',freightRetentionPct:finalQuality.retention,onTimeDrop:(network.v48IncumbentOnTime-(modeled.onTimePct||0)),waitIncrease:0,expenseIncrease:0};
     if(freightGate.failed)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if((removed.runtimeViolations||[]).length||(removed.capacityViolations||[]).length)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if((modeled.onTimePct||0)+1e-9<serviceFloor)verdict.verdict='FAILED — SERVICE REGRESSION';else verdict.verdict='VALID MILEAGE-FIRST SOLUTION';
     const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
-    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V53 Full Deterministic Pipeline - V44 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V54 Surgical Freight Recovery - V53 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
     scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
   }catch(err){console.error('V49 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
   finally{scenarioV49Running=false;scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
@@ -15300,15 +15554,15 @@ runScenarioModel=async function(){
 
 const scenarioV49ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
-  const html=scenarioV49ReportBase(r);if(r?.optimizerVersion!=='V53 Full Deterministic Pipeline - V44 Foundation')return html;
+  const html=scenarioV49ReportBase(r);if(r?.optimizerVersion!=='V54 Surgical Freight Recovery - V53 Foundation')return html;
   const n=r.removed?.networkAnalysis||{},rec=n.v42Recovery||{},rec2=n.v48SecondRecovery||{},m=r.modeled||{},fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v49ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V53 Full Deterministic Pipeline — V44 Foundation</h3><div class="scenario-help">V53 makes both halves of Full Model deterministic. The V44 scratch constructor now uses stable stop/route keys, deterministic score tie-breakers and a fixed route-start fallback instead of incidental array order or the browser clock. The V49 mileage pass still evaluates the same fixed 2,000 candidates in deterministic order. Identical imported data and Scenario Lever settings should therefore produce the same network. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v49MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v49ServiceFloor||0,1)}% · <strong>Freight floor:</strong> ${scenarioFmt(n.v49FreightFloor||0,1)}% · <strong>Rejected:</strong> ${(n.rejectedNoGain||0).toLocaleString()} no-mile-gain / ${(n.rejectedService||0).toLocaleString()} service / ${(n.rejectedFeasibility||0).toLocaleString()} freight-or-feasibility · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v49ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V54 Surgical Freight Recovery — V53 Foundation</h3><div class="scenario-help">V54 leaves the V53 deterministic scratch construction and 2,000-candidate mileage optimizer unchanged. Only after the V53 solution is complete does RouteER attempt a surgical recovery of remaining unassigned freight. Direct insertion is tried first, then at most a one-stop ejection/rehome chain. The recovery is fully rolled back unless freight retention improves while capacity/runtime, the incumbent service floor, and a conservative mileage cap are all preserved. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v49MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v49ServiceFloor||0,1)}% · <strong>Freight floor:</strong> ${scenarioFmt(n.v49FreightFloor||0,1)}% · <strong>Rejected:</strong> ${(n.rejectedNoGain||0).toLocaleString()} no-mile-gain / ${(n.rejectedService||0).toLocaleString()} service / ${(n.rejectedFeasibility||0).toLocaleString()} freight-or-feasibility · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>V54 surgical recovery:</strong> ${n.v54Recovery?.remainingBefore||0} → ${n.v54Recovery?.remainingAfter||0}${n.v54Recovery?.rolledBack?` (ROLLED BACK: ${escapeHtml(n.v54Recovery.reason||'guardrail')})`:` (${n.v54Recovery?.direct||0} direct, ${n.v54Recovery?.ejection||0} ejection; ${scenarioFmt(n.v54Recovery?.addedMiles||0,1)} mi)`} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
 
 <script>
 // ============================================================
-// V53 — FULL DETERMINISTIC PIPELINE + V51 LIVE MANUAL RESULT TRACKING
+// V54 — SURGICAL FREIGHT RECOVERY ON V53 + V51 LIVE MANUAL RESULT TRACKING
 // Construction AND mileage search are deterministic for Full Model.
 // V51 — LIVE MANUAL RESULT TRACKING AFTER FULL MODEL
 // ============================================================
