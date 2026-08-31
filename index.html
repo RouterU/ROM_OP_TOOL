@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V49 Mileage Guardrail Fix / V44 Foundation</title>
+<title>RouteER - V51 Live Manual Result Tracking / V49 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -14962,5 +14962,203 @@ scenarioV27NetworkAnalysisHtml=function(r){
   return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v49ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V49 Mileage Guardrail Fix — V44 Foundation</h3><div class="scenario-help">V49 preserves the successful V44 construction and fixes the V48 freight-retention guardrail that prevented every mileage candidate from being accepted. The V44 result becomes the incumbent; cross-route changes are accepted only when they reduce total network miles, preserve hard feasibility/freight, and keep planned on-time within 0.5 percentage point of the incumbent. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v49MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v49ServiceFloor||0,1)}% · <strong>Freight floor:</strong> ${scenarioFmt(n.v49FreightFloor||0,1)}% · <strong>Rejected:</strong> ${(n.rejectedNoGain||0).toLocaleString()} no-mile-gain / ${(n.rejectedService||0).toLocaleString()} service / ${(n.rejectedFeasibility||0).toLocaleString()} freight-or-feasibility · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
+
+<script>
+// ============================================================
+// V51 — LIVE MANUAL RESULT TRACKING AFTER FULL MODEL
+// ============================================================
+// Once a Full Model has completed, manual workspace changes become a live
+// continuation of that test. The optimized result is retained as a checkpoint,
+// while the After Action Report's Modeled column is refreshed from the current
+// routes/stops so users can see the cause/effect of manual assignments,
+// unassignments, sequence changes, removals and route-time edits.
+
+function scenarioV51OptimizerIsRunning(){
+  return !!(window.scenarioV49Running||window.scenarioV44Running||window.scenarioV43Running||window.scenarioV42Running||window.scenarioV41Running||window.scenarioV40Running||window.scenarioV39Running||window.scenarioV38Running);
+}
+
+function scenarioV51WorkspaceFingerprint(){
+  const routeBits=(routes||[]).map(r=>[
+    r.id,
+    cleanTimeValue(r.earliestStartTime||''),
+    cleanTimeValue(r.latestStartTime||''),
+    cleanTimeValue(r.latestEndTime||''),
+    Number.isFinite(r.scenarioDispatchEpoch)?Math.round(r.scenarioDispatchEpoch*1000)/1000:''
+  ].join('~')).sort();
+  const stopBits=(stops||[]).map(s=>[
+    s.id,
+    s.routeId||'',
+    parseInt(s.seq,10)||0,
+    s.lockStart?1:0,
+    s.lockFinal?1:0
+  ].join('~')).sort();
+  return routeBits.join('|')+'||'+stopBits.join('|');
+}
+
+function scenarioV51InitManualTracking(){
+  const r=scenarioLastRun;
+  if(!r||r.mode!=='full')return null;
+  if(!r.manualTracking){
+    const fp=scenarioV51WorkspaceFingerprint();
+    r.manualTracking={
+      baselineFingerprint:fp,
+      lastFingerprint:fp,
+      optimizedModeled:scenarioClone(r.modeled||{}),
+      optimizedSolutionSnapshot:scenarioClone(r.solutionSnapshot||null),
+      editCount:0,
+      actions:[],
+      lastAction:'',
+      lastUpdatedAt:null
+    };
+  }
+  return r.manualTracking;
+}
+
+function scenarioV51ManualVerdict(r,live){
+  const original=r?.original||{};
+  const retention=original.shippedCases?((live.shippedCases||0)/(original.shippedCases||1))*100:100;
+  const runtime=scenarioValidateRouteRuntimeLimits(r.options||{});
+  const capacity=scenarioValidateCapacityLimits();
+  let verdict='MANUALLY ADJUSTED SOLUTION';
+  if(retention<99.9)verdict='MANUAL ADJUSTMENT — INCOMPLETE FREIGHT';
+  else if((runtime||[]).length||(capacity||[]).length)verdict='MANUAL ADJUSTMENT — CAPACITY / RUNTIME WARNING';
+  return {
+    verdict,
+    freightRetentionPct:retention,
+    onTimeDrop:(r.manualTracking?.optimizedModeled?.onTimePct||0)-(live.onTimePct||0),
+    waitIncrease:(live.waitMinutes||0)-(r.manualTracking?.optimizedModeled?.waitMinutes||0),
+    expenseIncrease:0,
+    manual:true
+  };
+}
+
+function scenarioV51RefreshLiveMetrics(actionLabel='Manual workspace adjustment',force=false){
+  const r=scenarioLastRun;
+  if(!r||r.mode!=='full'||scenarioV51OptimizerIsRunning())return false;
+  const tracking=scenarioV51InitManualTracking();
+  if(!tracking)return false;
+  const fp=scenarioV51WorkspaceFingerprint();
+  if(!force&&fp===tracking.lastFingerprint)return false;
+
+  const live=scenarioComputeModelMetrics(r.options||{});
+  if(r.options?.costMile||r.options?.costHour){
+    live.expense=(live.miles||0)*(r.options.costMile||0)+(live.hours||0)*(r.options.costHour||0);
+  }
+  r.modeled=scenarioClone(live);
+  r.verdict=scenarioV51ManualVerdict(r,live);
+  r.solutionSnapshot=scenarioClone(scenarioCaptureFinalSolutionSnapshot(r.options||{},live));
+
+  tracking.lastFingerprint=fp;
+  tracking.editCount=(tracking.editCount||0)+1;
+  tracking.lastAction=actionLabel||'Manual workspace adjustment';
+  tracking.lastUpdatedAt=new Date().toISOString();
+  tracking.actions=Array.isArray(tracking.actions)?tracking.actions:[];
+  tracking.actions.push({at:tracking.lastUpdatedAt,action:tracking.lastAction,modeled:scenarioClone(live)});
+  if(tracking.actions.length>25)tracking.actions=tracking.actions.slice(-25);
+
+  // Keep live validation details current without rewriting the optimizer's
+  // diagnostic history that explains how the original model was created.
+  r.manualRuntimeViolations=scenarioValidateRouteRuntimeLimits(r.options||{});
+  r.manualCapacityViolations=scenarioValidateCapacityLimits();
+  r.manualWaitReview=scenarioCountWaitViolations(r.options||{});
+  return true;
+}
+
+function scenarioV51MutationWrapper(fnName,label){
+  const original=window[fnName];
+  if(typeof original!=='function'||original.__v51Wrapped)return;
+  const wrapped=function(...args){
+    const before=scenarioLastRun?.mode==='full'&&!scenarioV51OptimizerIsRunning()?scenarioV51WorkspaceFingerprint():null;
+    const result=original.apply(this,args);
+    const finish=()=>{
+      if(before===null)return;
+      const after=scenarioV51WorkspaceFingerprint();
+      if(after!==before)scenarioV51RefreshLiveMetrics(label,false);
+    };
+    if(result&&typeof result.then==='function')return result.finally(finish);
+    finish();
+    return result;
+  };
+  wrapped.__v51Wrapped=true;
+  window[fnName]=wrapped;
+}
+
+// Track user-driven route/order edits. Internal optimizer routines are not
+// wrapped, and the running flags above prevent model construction from being
+// mistaken for manual activity.
+[
+  ['assignStop','Assign stop to route'],
+  ['unassign','Unassign stop'],
+  ['dropOnRoute','Drag/drop stop onto route'],
+  ['onDropStop','Drag/drop stop within route'],
+  ['handleMarkerDropOnRouteLine','Move stop using map route line'],
+  ['saveManualSequence','Save manual sequence'],
+  ['manifestMoveSelectedStops','Manifest bulk move'],
+  ['manifestUnassignSelectedStops','Manifest bulk unassign'],
+  ['manifestRemoveSelectedStops','Manifest bulk remove'],
+  ['manifestDrop','Manifest manual resequence'],
+  ['unassignAllStopsFromManifest','Manifest unassign all'],
+  ['unassignAllCustomerStopsFromRoutes','Unassign all routed customer stops'],
+  ['assignLassoStopsToRoute','Lasso assign stops'],
+  ['unassignLassoStops','Lasso unassign stops'],
+  ['removeStopFromSession','Remove stop from session'],
+  ['removeRouteFromSession','Remove route from session'],
+  ['removeSelectedRoutesFromSession','Remove selected routes from session'],
+  ['saveStopDetail','Edit stop routing controls'],
+  ['saveRouteDetail','Edit route details'],
+  ['applyTimeToRoutes','Apply route start/end time']
+].forEach(([name,label])=>scenarioV51MutationWrapper(name,label));
+
+function scenarioV51DeltaText(before,after,key,decimals=1,suffix=''){
+  const a=parseFloat(before?.[key])||0,b=parseFloat(after?.[key])||0,d=b-a;
+  return `${scenarioFmt(a,decimals)} → ${scenarioFmt(b,decimals)}${suffix} (${d>=0?'+':''}${scenarioFmt(d,decimals)}${suffix})`;
+}
+
+function scenarioV51ManualImpactHtml(r){
+  const t=r?.manualTracking;
+  if(!t||!(t.editCount>0))return '';
+  const before=t.optimizedModeled||{},after=r.modeled||{};
+  const milesDelta=(after.miles||0)-(before.miles||0);
+  const hoursDelta=(after.hours||0)-(before.hours||0);
+  const casesDelta=(after.shippedCases||0)-(before.shippedCases||0);
+  const serviceDelta=(after.onTimePct||0)-(before.onTimePct||0);
+  const milesCls=milesDelta<=0?'scenario-delta-good':'scenario-delta-bad';
+  const freightCls=casesDelta>=0?'scenario-delta-good':'scenario-delta-bad';
+  const serviceCls=serviceDelta>=0?'scenario-delta-good':'scenario-delta-bad';
+  return `<div class="scenario-card" style="margin-top:10px;border-color:rgba(79,140,255,.7);">
+    <h3>Manual Adjustment Impact — Live Test Results</h3>
+    <div class="scenario-help">The optimizer result is preserved as the checkpoint below. The <strong>Modeled</strong> KPIs at the top of this report now reflect the current workspace after your manual changes. This lets you place an unassigned stop, move/resequence work, then reopen the report to see the cause and effect immediately.</div>
+    <div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(5,minmax(0,1fr));">
+      <div class="scenario-kpi"><div class="v ${freightCls}">${scenarioFmt(before.shippedCases||0,0)} → ${scenarioFmt(after.shippedCases||0,0)}</div><div class="l">Shipped Cases</div></div>
+      <div class="scenario-kpi"><div class="v ${milesCls}">${scenarioFmt(before.miles||0,1)} → ${scenarioFmt(after.miles||0,1)}</div><div class="l">Miles</div></div>
+      <div class="scenario-kpi"><div class="v ${hoursDelta<=0?'scenario-delta-good':'scenario-delta-bad'}">${scenarioFmt(before.hours||0,1)} → ${scenarioFmt(after.hours||0,1)}</div><div class="l">Route Hours</div></div>
+      <div class="scenario-kpi"><div class="v ${serviceCls}">${scenarioFmt(before.onTimePct||0,1)}% → ${scenarioFmt(after.onTimePct||0,1)}%</div><div class="l">Planned On-Time</div></div>
+      <div class="scenario-kpi"><div class="v">${scenarioFmt(before.routesUsed||0,0)} → ${scenarioFmt(after.routesUsed||0,0)}</div><div class="l">Routes Used</div></div>
+    </div>
+    <div class="scenario-note"><strong>${t.editCount} manual adjustment${t.editCount===1?'':'s'} recorded.</strong> Last action: ${escapeHtml(t.lastAction||'Manual workspace adjustment')}. Optimized checkpoint remains available for comparison. ${r.manualRuntimeViolations?.length?`<br/><strong>Current runtime warnings:</strong> ${escapeHtml(r.manualRuntimeViolations.join(' | '))}`:''}${r.manualCapacityViolations?.length?`<br/><strong>Current capacity warnings:</strong> ${escapeHtml(r.manualCapacityViolations.join(' | '))}`:''}</div>
+  </div>`;
+}
+
+// Refresh live metrics whenever the report is reopened. This also catches any
+// manual edit path that was not one of the common UI mutations wrapped above.
+const scenarioV51ReportBase=openScenarioAfterActionReport;
+openScenarioAfterActionReport=function(){
+  const r=scenarioLastRun;
+  if(r?.mode==='full'){
+    const t=scenarioV51InitManualTracking();
+    if(t&&scenarioV51WorkspaceFingerprint()!==t.lastFingerprint){
+      scenarioV51RefreshLiveMetrics('Manual workspace adjustment',false);
+    }
+  }
+  scenarioV51ReportBase();
+  const liveRun=scenarioLastRun;
+  if(liveRun?.mode==='full'){
+    const body=document.getElementById('scenario-report-body');
+    const html=scenarioV51ManualImpactHtml(liveRun);
+    if(body&&html)body.insertAdjacentHTML('beforeend',html);
+  }
+};
+</script>
+
 </body>
 </html>
