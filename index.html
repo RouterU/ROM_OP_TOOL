@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V52 Deterministic Optimizer / V51 Live Tracking</title>
+<title>RouteER - V53 Full Deterministic Pipeline / V51 Live Tracking</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -15015,6 +15015,238 @@ async function scenarioV52MileagePass(opts,stats,maxEvaluations,serviceFloor,ret
   };
 }
 
+
+// ============================================================
+// V53 — FULL DETERMINISTIC PIPELINE
+// ============================================================
+// V52 made the post-build mileage search deterministic, but the V44 scratch
+// constructor could still break score ties according to incidental array order,
+// and its route-start fallback ultimately depended on Date.now() when an imported
+// resource had no usable start timestamp. V53 removes those remaining sources of
+// run-to-run drift from FULL MODEL only. Lite ReOp remains unchanged.
+
+function scenarioV53StopKey(s){
+  return [
+    String(s?.locationKey||''),
+    String(s?.customerNumber||''),
+    String(s?.orderNumber||''),
+    String(s?.customerName||''),
+    Number.isFinite(+s?.lat)?(+s.lat).toFixed(6):'',
+    Number.isFinite(+s?.lng)?(+s.lng).toFixed(6):''
+  ].join('|');
+}
+function scenarioV53RouteKey(r){
+  return [
+    String(r?.initialLocationKey||''),
+    String(r?.udfNumber1||''),
+    String(r?.routeTemplateKey||''),
+    String(r?.resourceName||r?.routeData?.resourceName||''),
+    String(r?.name||'')
+  ].join('|');
+}
+function scenarioV53CmpKey(a,b,keyFn){
+  return keyFn(a).localeCompare(keyFn(b),undefined,{numeric:true,sensitivity:'base'});
+}
+function scenarioV53ScoreCmp(a,b,scoreFn,keyFn){
+  const av=+scoreFn(a),bv=+scoreFn(b);
+  if(Math.abs(av-bv)>1e-7)return av-bv;
+  return scenarioV53CmpKey(a,b,keyFn);
+}
+function scenarioV53OriginalStart(route){
+  // Preserve imported start behavior when available.
+  const imported=scenarioEpochMinutes(route?.routeData?.routeStart)
+    || scenarioEpochMinutes((route?.date||'')+' '+(route?.earliestStartTime||'00:00'));
+  if(Number.isFinite(imported))return imported;
+
+  // Deterministic fallback: use the scenario/import route date at midnight,
+  // never the current browser clock.
+  const date=(route?.date||document.getElementById('route-date')?.value||importRouteDateValue?.()||'1970-01-01').toString().slice(0,10);
+  const fallback=scenarioEpochMinutes(date+' 00:00');
+  return Number.isFinite(fallback)?fallback:0;
+}
+function scenarioV53DispatchStarts(route,opts,fine=false){
+  const win=scenarioV31ResourceWindow(route),orig=scenarioV53OriginalStart(route),starts=[];
+  if(!opts.optDispatch)return Number.isFinite(orig)?[orig]:[];
+  const lo=Number.isFinite(win.start)?win.start:(Number.isFinite(orig)?orig-120:0);
+  const hi=Number.isFinite(win.end)?Math.max(lo,win.end-30):(Number.isFinite(orig)?orig+480:lo+480);
+  const step=fine?10:30;
+  for(let s=lo;s<=hi;s+=step)starts.push(s);
+  if(Number.isFinite(orig)&&!starts.some(x=>Math.abs(x-orig)<1))starts.push(orig);
+  return [...new Set(starts.map(x=>Math.round(x*1000)/1000))].sort((a,b)=>a-b);
+}
+function scenarioV53BestDispatch(route,customers,opts,{relaxed=false,fine=false,floor=null}={}){
+  const order=scenarioComposePreservingDepots(route.id,scenarioOrderCustomersForSpecialRules(customers||[]));
+  const win=scenarioV31ResourceWindow(route),orig=scenarioV53OriginalStart(route),allowed=Math.max(0,+opts.allowedWaitMinutes||5);
+  const serviceFloor=Number.isFinite(+floor)?+floor:scenarioV44LocalFloor(opts);
+  let best=null;
+  for(const start of scenarioV53DispatchStarts(route,opts,fine)){
+    if(!Number.isFinite(start))continue;
+    const sim=scenarioEvaluateOrderedRoute(route,order,start);
+    if(Number.isFinite(win.end)&&sim.endEpoch>win.end+1e-6)continue;
+    if(!scenarioRuntimeOk(sim,opts,true))continue;
+    const svc=scenarioV40Service(sim),wait=scenarioV44WaitOver(sim,allowed);
+    if(!relaxed&&wait.max>Math.max(allowed+20,30))continue;
+    if(relaxed&&wait.max>120+1e-6)continue;
+    const short=Math.max(0,serviceFloor-svc.pct);
+    const score=short*1.2e9+(short>0?svc.late*8e7:svc.late*12000)+wait.over*2.5e6+
+      (sim.miles||0)*(opts.optMiles?260000:35000)+(sim.hours||0)*(opts.optTime?22000:6000)+
+      Math.abs(start-orig)*20;
+    const candidate={start,sim,order,score,wait,svc};
+    if(!best ||
+       score<best.score-1e-7 ||
+       (Math.abs(score-best.score)<=1e-7 && start<best.start)){
+      best=candidate;
+    }
+  }
+  return best;
+}
+// Keep the V44 insertion philosophy but route all dispatch evaluation through
+// deterministic start/tie logic.
+function scenarioV53Insertion(stop,route,opts,relaxed=false){
+  if(!scenarioCanTargetRoute(stop,route,opts))return null;
+  const base=scenarioV39Customers(route.id).filter(s=>s.id!==stop.id)
+    .slice().sort((a,b)=>(a.seq||0)-(b.seq||0)||scenarioV53CmpKey(a,b,scenarioV53StopKey));
+  const cap=scenarioCapacityStatus(route,[...base,stop]);
+  if(!cap.known&&route.id!==scenarioOriginalRouteId(stop))return null;
+  if(cap.known&&!cap.ok)return null;
+  const baseMiles=scenarioRouteHasCustomerWork(route.id)?Math.max(0,scenarioRouteRuntime(route)?.miles||0):0;
+  let best=null;
+  for(const i of scenarioV322CandidatePositions(stop,base,opts)){
+    const candidate=[...base];candidate.splice(i,0,stop);
+    const ordered=scenarioOrderCustomersForSpecialRules(candidate);
+    const disp=scenarioV53BestDispatch(route,ordered,opts,{relaxed,fine:false});
+    if(!disp)continue;
+    const marginal=Math.max(0,(disp.sim.miles||0)-baseMiles),aff=scenarioV42RouteAffinity(route,stop);
+    const score=disp.score+marginal*4.5e6+aff*55000+(base.length?0:180000);
+    const c={route,customers:ordered,order:disp.order,sim:disp.sim,start:disp.start,score,wait:disp.wait,_v44Marginal:marginal,_v44Affinity:aff,_v53Position:i};
+    if(!best ||
+       score<best.score-1e-7 ||
+       (Math.abs(score-best.score)<=1e-7 && marginal<best._v44Marginal-1e-7) ||
+       (Math.abs(score-best.score)<=1e-7 && Math.abs(marginal-best._v44Marginal)<=1e-7 && i<best._v53Position)){
+      best=c;
+    }
+  }
+  return best;
+}
+async function scenarioV53Build(opts){
+  const started=performance.now();
+  const pool=scenarioV42BuildPool().slice().sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53StopKey));
+  const stats={mode:'scratch',algorithm:'V53 deterministic V44 target-budget build',poolStops:pool.length,poolCases:pool.reduce((a,s)=>a+scenarioV32Cases(s),0),difficultFirstPlacements:0,initialPlacedStops:0,initialUnassigned:0,unassignedStops:0,unassignedCases:0,freightRecoveredCases:0,routesActivated:0,routesRetired:0,primaryBuildSeconds:0,recoverySeconds:0,routeTests:0,geographicSeeds:0,geographicGrowthPlacements:0,desiredSeedRoutes:0,serviceRejectedGrowth:0,megaFreightReserved:0,completionBased:true,budgetExceeded:false,v53DeterministicBuild:true};
+  pool.forEach(s=>{s.scenarioV43SourceRouteId=s.routeId||s.scenarioV43SourceRouteId||null;s.routeId=null;s.seq=0;if(/^Build From Scratch:/i.test(s.scenarioRemovedReason||''))s.scenarioRemovedReason='';});
+  routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
+
+  const groups=new Map();
+  for(const s of pool){const k=scenarioV42DepotKey(s,opts);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);}
+  const groupEntries=[...groups.entries()].sort((a,b)=>String(a[0]).localeCompare(String(b[0]),undefined,{numeric:true,sensitivity:'base'}));
+  let totalDone=0;
+
+  for(const [key,groupRaw] of groupEntries){
+    const group=groupRaw.slice().sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53StopKey));
+    const dep=scenarioV42DepotForKey(key,group);
+    const eligible=scenarioV43EligibleUnion(group,opts).slice().sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53RouteKey));
+    const desired=scenarioV43DesiredRoutes(group,eligible.length,opts);
+    stats.desiredSeedRoutes+=desired;
+    const usedRoutes=new Set(),seededStops=new Set();
+
+    const megaCut=scenarioV44MegaThreshold(group);
+    const mega=group.filter(s=>(scenarioV32Cases(s)||0)>=megaCut)
+      .sort((a,b)=>(scenarioV32Cases(b)-scenarioV32Cases(a))||scenarioV53CmpKey(a,b,scenarioV53StopKey));
+
+    for(const s of mega){
+      const orig=s.scenarioV43SourceRouteId?eligible.find(r=>r.id===s.scenarioV43SourceRouteId):null;
+      let cand=orig&&!scenarioRouteHasCustomerWork(orig.id)?scenarioV53Insertion(s,orig,opts,true):null;
+      stats.routeTests++;
+      if(!cand){
+        const choices=eligible.filter(r=>!scenarioRouteHasCustomerWork(r.id)).slice(0,12);
+        for(const r of choices){
+          const c=scenarioV53Insertion(s,r,opts,true);stats.routeTests++;
+          if(c && (!cand || c.score<cand.score-1e-7 ||
+             (Math.abs(c.score-cand.score)<=1e-7 && scenarioV53CmpKey(c.route,cand.route,scenarioV53RouteKey)<0))) cand=c;
+        }
+      }
+      if(scenarioV44Commit(s,cand)){usedRoutes.add(cand.route.id);seededStops.add(s.id);stats.megaFreightReserved++;stats.geographicSeeds++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;totalDone++;}
+      await scenarioV39Yield();
+    }
+
+    const anchorCount=Math.max(0,desired-usedRoutes.size);
+    const anchors=scenarioV43SeedAnchors(group.filter(s=>!seededStops.has(s.id)),anchorCount,dep);
+    anchors.sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53StopKey));
+
+    for(const anchor of anchors){
+      let best=null;
+      const dormant=eligible.filter(r=>!usedRoutes.has(r.id)&&!scenarioRouteHasCustomerWork(r.id));
+      for(const r of dormant.slice(0,16)){
+        const c=scenarioV53Insertion(anchor,r,opts,false);stats.routeTests++;
+        if(c && (!best || c.score<best.score-1e-7 ||
+           (Math.abs(c.score-best.score)<=1e-7 && scenarioV53CmpKey(c.route,best.route,scenarioV53RouteKey)<0))) best=c;
+      }
+      if(scenarioV44Commit(anchor,best)){usedRoutes.add(best.route.id);seededStops.add(anchor.id);stats.geographicSeeds++;stats.initialPlacedStops++;stats.difficultFirstPlacements++;totalDone++;}
+      scenarioV39Progress('Seeding deterministic V44 territories…',`${totalDone}/${pool.length} placed · ${usedRoutes.size}/${desired} territory resources`);
+      await scenarioV39Yield();
+    }
+
+    const remaining=group.filter(s=>!seededStops.has(s.id)&&!s.routeId)
+      .sort((a,b)=>{
+        const d=scenarioV43AnchorPriority(b,dep)-scenarioV43AnchorPriority(a,dep);
+        return Math.abs(d)>1e-7?d:scenarioV53CmpKey(a,b,scenarioV53StopKey);
+      });
+
+    for(const s of remaining){
+      let active=eligible.filter(r=>scenarioRouteHasCustomerWork(r.id));
+      active.sort((a,b)=>{
+        const d=scenarioV42RouteAffinity(a,s)-scenarioV42RouteAffinity(b,s);
+        return Math.abs(d)>1e-7?d:scenarioV53CmpKey(a,b,scenarioV53RouteKey);
+      });
+      let best=null;
+      for(const r of active.slice(0,Math.min(6,active.length))){
+        const c=scenarioV53Insertion(s,r,opts,false);stats.routeTests++;
+        if(c && (!best || c.score<best.score-1e-7 ||
+           (Math.abs(c.score-best.score)<=1e-7 && scenarioV53CmpKey(c.route,best.route,scenarioV53RouteKey)<0))) best=c;
+        else if(!c)stats.serviceRejectedGrowth++;
+      }
+      if(!best){
+        const dormant=eligible.filter(r=>!scenarioRouteHasCustomerWork(r.id));
+        for(const r of dormant.slice(0,6)){
+          const c=scenarioV53Insertion(s,r,opts,false);stats.routeTests++;
+          if(c && (!best || c.score<best.score-1e-7 ||
+             (Math.abs(c.score-best.score)<=1e-7 && scenarioV53CmpKey(c.route,best.route,scenarioV53RouteKey)<0))) best=c;
+        }
+      }
+      if(scenarioV44Commit(s,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;stats.geographicGrowthPlacements++;totalDone++;}
+      if(totalDone%3===0){scenarioV39Progress('Growing deterministic mileage-efficient territories…',`${totalDone}/${pool.length} placed · ${routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length} active routes`);await scenarioV39Yield();}
+    }
+  }
+
+  let unplaced=pool.filter(s=>!s.routeId).sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53StopKey)),done=0;
+  for(const s of [...unplaced]){
+    const rs=scenarioV39EligibleRoutes(s,opts,'').slice().sort((a,b)=>{
+      const d=scenarioV39CheapRouteScore(a,s)-scenarioV39CheapRouteScore(b,s);
+      return Math.abs(d)>1e-7?d:scenarioV53CmpKey(a,b,scenarioV53RouteKey);
+    });
+    let best=null;
+    for(const r of rs){
+      const c=scenarioV53Insertion(s,r,opts,true);stats.routeTests++;
+      if(c && (!best || c.score<best.score-1e-7 ||
+         (Math.abs(c.score-best.score)<=1e-7 && scenarioV53CmpKey(c.route,best.route,scenarioV53RouteKey)<0))) best=c;
+    }
+    if(scenarioV44Commit(s,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;}
+    done++;
+    if(done%2===0){scenarioV39Progress('Completing deterministic freight placement…',`${done}/${unplaced.length} difficult stop(s) reviewed`);await scenarioV39Yield();}
+  }
+
+  unplaced=pool.filter(s=>!s.routeId);
+  stats.primaryBuildSeconds=(performance.now()-started)/1000;stats.initialUnassigned=unplaced.length;
+  for(const s of unplaced){s.routeId=null;s.seq=0;s.scenarioRemovedReason='Build From Scratch: awaiting V53 freight recovery';}
+  stats.unassignedStops=unplaced.length;stats.unassignedCases=unplaced.reduce((a,s)=>a+scenarioV32Cases(s),0);stats.routesActivated=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)).length;
+  return stats;
+}
+
+// Redirect V44 dispatch calls used later in the V49/V52 mileage logic through
+// deterministic equivalents without changing Lite ReOp.
+scenarioV44DispatchStarts=scenarioV53DispatchStarts;
+scenarioV44BestDispatch=scenarioV53BestDispatch;
+scenarioV44Insertion=scenarioV53Insertion;
+
 runScenarioModel=async function(){
   if(scenarioV49Running||scenarioV44Running){showToast('Scenario optimization is already running.');return;}
   if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
@@ -15023,14 +15255,14 @@ runScenarioModel=async function(){
   try{
     const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
     if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
-    scenarioV39Progress('Preparing V52 deterministic mileage optimization…','V44 efficiency foundation · fixed candidate budget · repeatable results');await scenarioV39Yield();
+    scenarioV39Progress('Preparing V53 fully deterministic optimization…','Deterministic V44 construction · deterministic 2,000-candidate mileage search');await scenarioV39Yield();
     restoreScenarioBaseline();
     stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
     scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
     const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
     if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
-    let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV44Build(opts);
-    const network={optimizer:'V49 mileage guardrail fix on V44 foundation',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+    let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV53Build(opts);
+    const network={optimizer:'V53 deterministic V44 + V49 mileage pipeline',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
 
     // Freeze the successful V44 construction behavior.
     await scenarioV44SequenceAll(opts,network,'Sequencing V44 efficiency foundation…',false);
@@ -15060,7 +15292,7 @@ runScenarioModel=async function(){
     const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'MILEAGE-FIRST SOLUTION',freightRetentionPct:finalQuality.retention,onTimeDrop:(network.v48IncumbentOnTime-(modeled.onTimePct||0)),waitIncrease:0,expenseIncrease:0};
     if(freightGate.failed)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if((removed.runtimeViolations||[]).length||(removed.capacityViolations||[]).length)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if((modeled.onTimePct||0)+1e-9<serviceFloor)verdict.verdict='FAILED — SERVICE REGRESSION';else verdict.verdict='VALID MILEAGE-FIRST SOLUTION';
     const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
-    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V52 Deterministic Mileage Optimizer - V44 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V53 Full Deterministic Pipeline - V44 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
     scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
   }catch(err){console.error('V49 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
   finally{scenarioV49Running=false;scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
@@ -15068,16 +15300,16 @@ runScenarioModel=async function(){
 
 const scenarioV49ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
-  const html=scenarioV49ReportBase(r);if(r?.optimizerVersion!=='V52 Deterministic Mileage Optimizer - V44 Foundation')return html;
+  const html=scenarioV49ReportBase(r);if(r?.optimizerVersion!=='V53 Full Deterministic Pipeline - V44 Foundation')return html;
   const n=r.removed?.networkAnalysis||{},rec=n.v42Recovery||{},rec2=n.v48SecondRecovery||{},m=r.modeled||{},fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v49ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V52 Deterministic Mileage Optimizer — V44 Foundation</h3><div class="scenario-help">V52 preserves the V44/V49 mileage logic but removes wall-clock timing from the mileage search. Each run evaluates the same fixed candidate budget in deterministic order, so identical data and settings produce repeatable results regardless of browser/CPU speed. Cross-route changes still must reduce total network miles, preserve hard feasibility/freight, and keep planned on-time within 0.5 percentage point of the incumbent. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v49MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v49ServiceFloor||0,1)}% · <strong>Freight floor:</strong> ${scenarioFmt(n.v49FreightFloor||0,1)}% · <strong>Rejected:</strong> ${(n.rejectedNoGain||0).toLocaleString()} no-mile-gain / ${(n.rejectedService||0).toLocaleString()} service / ${(n.rejectedFeasibility||0).toLocaleString()} freight-or-feasibility · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v49ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V53 Full Deterministic Pipeline — V44 Foundation</h3><div class="scenario-help">V53 makes both halves of Full Model deterministic. The V44 scratch constructor now uses stable stop/route keys, deterministic score tie-breakers and a fixed route-start fallback instead of incidental array order or the browser clock. The V49 mileage pass still evaluates the same fixed 2,000 candidates in deterministic order. Identical imported data and Scenario Lever settings should therefore produce the same network. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v49MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v49ServiceFloor||0,1)}% · <strong>Freight floor:</strong> ${scenarioFmt(n.v49FreightFloor||0,1)}% · <strong>Rejected:</strong> ${(n.rejectedNoGain||0).toLocaleString()} no-mile-gain / ${(n.rejectedService||0).toLocaleString()} service / ${(n.rejectedFeasibility||0).toLocaleString()} freight-or-feasibility · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
 
 <script>
 // ============================================================
-// V52 — DETERMINISTIC FULL MODEL + V51 LIVE MANUAL RESULT TRACKING
-// Same data/settings should now return the same optimization result.
+// V53 — FULL DETERMINISTIC PIPELINE + V51 LIVE MANUAL RESULT TRACKING
+// Construction AND mileage search are deterministic for Full Model.
 // V51 — LIVE MANUAL RESULT TRACKING AFTER FULL MODEL
 // ============================================================
 // Once a Full Model has completed, manual workspace changes become a live
