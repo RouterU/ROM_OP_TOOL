@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V48 Mileage-First Optimizer / V44 Foundation</title>
+<title>RouteER - V49 Mileage Guardrail Fix / V44 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -14714,18 +14714,19 @@ scenarioV27NetworkAnalysisHtml=function(r){
 
 <script>
 // ============================================================
-// V48 — MILEAGE-FIRST OPTIMIZER ON THE V44 FOUNDATION
+// V49 — MILEAGE GUARDRAIL FIX ON THE V44 FOUNDATION
 // ============================================================
 // V44 construction is frozen. V48 does NOT buy service with miles.
 // It establishes the V44/V47 result as the incumbent, then accepts only
 // cross-route changes that reduce total network miles while preserving freight,
 // hard feasibility, and essentially the incumbent network on-time percentage.
 // Lite ReOp is not changed.
-let scenarioV48Running=false;
+let scenarioV49Running=false;
 
-async function scenarioV48MileagePass(opts,stats,deadline,serviceFloor){
+async function scenarioV49MileagePass(opts,stats,deadline,serviceFloor,retentionFloor){
   let evaluated=0,accepted=0,saved=0,passes=0;
   const floor=Math.max(0,+serviceFloor||0);
+  const freightFloor=Math.max(0,+retentionFloor||0);
   while(performance.now()<deadline&&passes<3){
     passes++;let improved=false;
     const active=routes.filter(r=>scenarioRouteHasCustomerWork(r.id)&&!scenarioRouteIsProtectedLongHaul(r));
@@ -14771,7 +14772,9 @@ async function scenarioV48MileagePass(opts,stats,deadline,serviceFloor){
           const gain=beforeMiles-afterMiles;
           // Mileage must actually improve. Freight and hard feasibility cannot regress.
           // Service is a guardrail only: no more than 0.5 point below the incumbent floor.
-          if(gain<1.0||q.retention<99.0||!q.validFeasibility||(after.onTimePct||0)+1e-9<floor){scenarioRestoreWorkingState(snap);continue;}
+          if(gain<1.0){stats.rejectedNoGain=(stats.rejectedNoGain||0)+1;scenarioRestoreWorkingState(snap);continue;}
+          if(q.retention+1e-9<freightFloor||!q.validFeasibility){stats.rejectedFeasibility=(stats.rejectedFeasibility||0)+1;scenarioRestoreWorkingState(snap);continue;}
+          if((after.onTimePct||0)+1e-9<floor){stats.rejectedService=(stats.rejectedService||0)+1;scenarioRestoreWorkingState(snap);continue;}
           accepted++;saved+=gain;improved=true;
           stats.stopsReassigned=(stats.stopsReassigned||0)+1;stats.relocationsAccepted=(stats.relocationsAccepted||0)+1;
           if(evaluated%8===0){scenarioV39Progress('Reducing network miles…',`${evaluated} candidate moves tested · ${accepted} accepted · ${scenarioFmt(saved,1)} miles removed`);await scenarioV39Yield();}
@@ -14781,26 +14784,26 @@ async function scenarioV48MileagePass(opts,stats,deadline,serviceFloor){
     if(!improved)break;
   }
   stats.relocationsEvaluated=(stats.relocationsEvaluated||0)+evaluated;
-  stats.v48MileageMoves=accepted;stats.v48MilesSaved=saved;stats.v48MileagePasses=passes;stats.v48ServiceFloor=floor;
+  stats.v49MileageMoves=accepted;stats.v49MilesSaved=saved;stats.v49MileagePasses=passes;stats.v49ServiceFloor=floor;stats.v49FreightFloor=freightFloor;
   return {evaluated,accepted,saved,passes};
 }
 
 runScenarioModel=async function(){
-  if(scenarioV48Running||scenarioV44Running){showToast('Scenario optimization is already running.');return;}
+  if(scenarioV49Running||scenarioV44Running){showToast('Scenario optimization is already running.');return;}
   if(!scenarioBaseline){showToast('Import Route Data before running Scenario Levers.');return;}
-  scenarioV48Running=true;scenarioV44Running=true;scenarioV43Running=true;scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
+  scenarioV49Running=true;scenarioV44Running=true;scenarioV43Running=true;scenarioV42Running=true;scenarioV41Running=true;scenarioV40Running=true;scenarioV39Running=true;scenarioV38Running=true;
   const overallStart=performance.now();
   try{
     const opts=scenarioReadOptions();scenarioV31ScratchActive=opts.optimizationMode==='scratch';
     if(!opts.runtimeUseResourceMin&&!opts.runtimeUseResourceMax&&opts.minRouteHours>0&&opts.maxRouteHours>0&&opts.minRouteHours>opts.maxRouteHours){showToast('Minimum Route Run Time cannot be greater than Maximum Route Run Time.');return;}
-    scenarioV39Progress('Preparing V48 mileage-first optimization…','V44 efficiency foundation · freight recovery · mileage reduction with service guardrail');await scenarioV39Yield();
+    scenarioV39Progress('Preparing V49 mileage-first optimization…','V44 efficiency foundation · corrected freight guardrail · mileage reduction');await scenarioV39Yield();
     restoreScenarioBaseline();
     stops.filter(s=>s.sourceType==='route-data'&&scenarioIsFixedRouteAnchor(s)).forEach(s=>{if(scenarioIsDepotStop(s))s.scenarioDepotAnchor=true;if(scenarioIsLayoverStop(s))s.scenarioLayoverAnchor=true;s.scenarioOriginalSeq=scenarioDepotOriginalSeq(s);});
     scenarioBuildOptimizerBaselineSnapshot();const removed=scenarioApplyFilters(opts);scenarioCapturePostFilterTimingSnapshot(opts);const postFilterMetrics=scenarioComputePostFilterMetrics(opts);
     const original=scenarioClone(scenarioBaseline.metrics||scenarioComputeBaselineMetrics(scenarioBaseline.routes,scenarioBaseline.stops));
     if(opts.costMile||opts.costHour){original.expense=original.miles*opts.costMile+original.hours*opts.costHour;postFilterMetrics.expense=postFilterMetrics.miles*opts.costMile+postFilterMetrics.hours*opts.costHour;}
     let scratch=null;if(opts.optimizationMode==='scratch')scratch=await scenarioV44Build(opts);
-    const network={optimizer:'V48 mileage-first on V44 foundation',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
+    const network={optimizer:'V49 mileage guardrail fix on V44 foundation',relocationsEvaluated:0,relocationsAccepted:0,swapsEvaluated:0,swapsAccepted:0,stopsReassigned:0,localSequenceMoves:0,dispatchChanges:0,routesRetired:0,retirementReviewed:0,retiredRoutes:[],acceptedMoves:[],rejectedService:0,rejectedFeasibility:0,rejectedNoGain:0,budgetExhausted:false,runtimeSeconds:0,performanceGuardrail:true,freightRecoveredCases:0,ejectionMoves:0,ejectionChains:0};
 
     // Freeze the successful V44 construction behavior.
     await scenarioV44SequenceAll(opts,network,'Sequencing V44 efficiency foundation…',false);
@@ -14809,11 +14812,13 @@ runScenarioModel=async function(){
 
     // Establish the incumbent. V48 will not spend miles to improve service.
     const incumbent=scenarioComputeModelMetrics(opts);
-    network.v48IncumbentMiles=+incumbent.miles||0;network.v48IncumbentOnTime=+incumbent.onTimePct||0;
+    network.v49IncumbentMiles=+incumbent.miles||0;network.v49IncumbentOnTime=+incumbent.onTimePct||0;
+    const incumbentQuality=scenarioV40NetworkQuality(opts);network.v49IncumbentRetention=+incumbentQuality.retention||0;
     // Allow only a tiny 0.5 percentage-point service tolerance while chasing real mileage savings.
     const serviceFloor=Math.max(0,(+incumbent.onTimePct||0)-0.5);
+    const retentionFloor=Math.max(0,(+incumbentQuality.retention||0)-0.01);
     const mileageDeadline=performance.now()+300000;
-    const mileage=await scenarioV48MileagePass(opts,network,mileageDeadline,serviceFloor);
+    const mileage=await scenarioV49MileagePass(opts,network,mileageDeadline,serviceFloor,retentionFloor);
 
     // One final freight retry, but no service-buying repair layer.
     const recovery2=await scenarioV42RecoverFreight(opts,network,120000);network.v48SecondRecovery=recovery2;
@@ -14828,17 +14833,17 @@ runScenarioModel=async function(){
     const finalQuality=scenarioV40NetworkQuality(opts);let verdict={verdict:'MILEAGE-FIRST SOLUTION',freightRetentionPct:finalQuality.retention,onTimeDrop:(network.v48IncumbentOnTime-(modeled.onTimePct||0)),waitIncrease:0,expenseIncrease:0};
     if(freightGate.failed)verdict.verdict='FAILED — INCOMPLETE FREIGHT';else if((removed.runtimeViolations||[]).length||(removed.capacityViolations||[]).length)verdict.verdict='FAILED — CAPACITY / RUNTIME VIOLATION';else if((modeled.onTimePct||0)+1e-9<serviceFloor)verdict.verdict='FAILED — SERVICE REGRESSION';else verdict.verdict='VALID MILEAGE-FIRST SOLUTION';
     const finalSnapshot=scenarioCaptureFinalSolutionSnapshot(opts,modeled);
-    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V48 Mileage-First - V44 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
+    scenarioLastRun={ranAt:new Date().toISOString(),mode:'full',optimizerVersion:'V49 Mileage Guardrail Fix - V44 Foundation',options:{...opts,ignoreValues:[...opts.ignoreValues]},removed,original:scenarioClone(original),postFilter:scenarioClone(postFilterMetrics),modeled:scenarioClone(modeled),verdict,solutionSnapshot:scenarioClone(finalSnapshot)};
     scenarioRefreshWorkspaceAfterRun();closeModal('scenario-levers-modal');scenarioV38HideProgress();openScenarioAfterActionReport();
-  }catch(err){console.error('V48 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
-  finally{scenarioV48Running=false;scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
+  }catch(err){console.error('V49 Run Model failed:',err);scenarioV38HideProgress();showToast('Run Model error: '+((err&&err.message)||err));}
+  finally{scenarioV49Running=false;scenarioV44Running=false;scenarioV43Running=false;scenarioV42Running=false;scenarioV41Running=false;scenarioV40Running=false;scenarioV39Running=false;scenarioV38Running=false;scenarioV38HideProgress();}
 };
 
-const scenarioV48ReportBase=scenarioV27NetworkAnalysisHtml;
+const scenarioV49ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
-  const html=scenarioV48ReportBase(r);if(r?.optimizerVersion!=='V48 Mileage-First - V44 Foundation')return html;
+  const html=scenarioV49ReportBase(r);if(r?.optimizerVersion!=='V49 Mileage Guardrail Fix - V44 Foundation')return html;
   const n=r.removed?.networkAnalysis||{},rec=n.v42Recovery||{},rec2=n.v48SecondRecovery||{},m=r.modeled||{},fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v48ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V48 Mileage-First — V44 Foundation</h3><div class="scenario-help">V48 preserves the successful V44 construction and does not buy service with additional mileage. The V44 result becomes the incumbent; cross-route changes are accepted only when they reduce total network miles, preserve hard feasibility/freight, and keep planned on-time within 0.5 percentage point of the incumbent. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v48IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v48IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v48MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v48MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v48ServiceFloor||0,1)}% · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&(m.onTimePct||0)+1e-9>=(n.v49ServiceFloor||0))?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V49 Mileage Guardrail Fix — V44 Foundation</h3><div class="scenario-help">V49 preserves the successful V44 construction and fixes the V48 freight-retention guardrail that prevented every mileage candidate from being accepted. The V44 result becomes the incumbent; cross-route changes are accepted only when they reduce total network miles, preserve hard feasibility/freight, and keep planned on-time within 0.5 percentage point of the incumbent. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentOnTime||0,1)}% → ${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time Guardrail</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49IncumbentMiles||0,1)} → ${scenarioFmt(m.miles||0,1)}</div><div class="l">Network Miles</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v49MilesSaved||0,1)}</div><div class="l">Cross-Route Miles Saved</div></div></div><div class="scenario-note"><strong>Mileage moves:</strong> ${n.v49MileageMoves||0} accepted / ${(n.relocationsEvaluated||0).toLocaleString()} evaluated · <strong>Service floor:</strong> ${scenarioFmt(n.v49ServiceFloor||0,1)}% · <strong>Freight floor:</strong> ${scenarioFmt(n.v49FreightFloor||0,1)}% · <strong>Rejected:</strong> ${(n.rejectedNoGain||0).toLocaleString()} no-mile-gain / ${(n.rejectedService||0).toLocaleString()} service / ${(n.rejectedFeasibility||0).toLocaleString()} freight-or-feasibility · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
 </body>
