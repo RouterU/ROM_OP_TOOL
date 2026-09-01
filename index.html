@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V54 Surgical Freight Recovery / V53 Deterministic Foundation</title>
+<title>RouteER - V56 App Workflow Enhancements / V55 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -688,7 +688,7 @@ body{background:var(--bg0);color:var(--text1);}
       <div style="font-size:9px;color:var(--text3);margin-top:6px;">Route Date changes imported routes only. Orders keep their imported Earliest/Latest Time Window dates. Region Code exports to the Output File worksheet in column B: Region Code.</div>
     </div>
     <div id="orders-cutid-filter" style="display:none;margin:10px 0 8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);">
-      <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;">Order Cut Import <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(Orders Only)</span></div>
+      <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;">Order Cut Filter <span id="cutid-filter-mode-label" style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(Orders Only)</span></div>
       <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;font-size:10px;color:var(--text2);">
         <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" class="cutid-chk" value="CUTID_1" style="accent-color:var(--accent);"> CUTID_1</label>
         <label style="display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" class="cutid-chk" value="CUTID_2" style="accent-color:var(--accent);"> CUTID_2</label>
@@ -704,7 +704,7 @@ body{background:var(--bg0);color:var(--text1);}
         <button type="button" class="btn" style="padding:2px 6px;font-size:9px;" onclick="toggleAllCutIds(true)">Select All</button>
         <button type="button" class="btn" style="padding:2px 6px;font-size:9px;" onclick="toggleAllCutIds(false)">Clear</button>
       </div>
-      <div style="font-size:9px;color:var(--text3);margin-top:6px;">Select the new cut(s) being added. The full file is still used to remove missing orders and refresh ORDER_STATUS values for orders already in the session.</div>
+      <div id="cutid-filter-help" style="font-size:9px;color:var(--text3);margin-top:6px;">Select the new cut(s) being added. The full file is still used to remove missing orders and refresh ORDER_STATUS values for orders already in the session.</div>
     </div>
     <div id="route-day-filter" style="margin:10px 0 8px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);">
       <div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;">Route Day Filter <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0;">(uses Route Templates UDFString2)</span></div>
@@ -1081,6 +1081,7 @@ body{background:var(--bg0);color:var(--text1);}
 </div>
 
 <script>
+// V56 — requested app workflow enhancements; optimizer logic unchanged.
 // ============================================================
 // STATE
 // ============================================================
@@ -1127,6 +1128,10 @@ let lassoSelectedStopIds=new Set();
 let currentOrderStatusFilter='ALL';
 let scenarioBaseline=null;
 let scenarioLastRun=null;
+// V55: live truck-capacity lookup used by route manifest warnings and scenario feasibility.
+// Keys are stored by exact TruckKey and by capacity suffix so changing a route's truck
+// immediately switches the active weight/cube limits instead of retaining stale imported limits.
+const truckCapacityRegistry=new Map();
 const ORDER_STATUS_GLOSSARY={
   '00':'Incomplete Order - Order has no products entered yet.',
   '02':'Incomplete and Cancelled - Cancelled order without products.',
@@ -1195,13 +1200,10 @@ window.addEventListener('DOMContentLoaded',()=>{
       showToast('Opening Street View for selected map point');
       return;
     }
-    if(mapRouteFilterActiveId){
-      restoreMapRouteFilter();
-      return;
-    }
-    if(mapDepotFilterKey){
-      restoreMapDepotFilter();
-    }
+    // V56: a route/depot map filter is sticky. Clicking empty map space no
+    // longer clears it. Users clear/change the filter explicitly by clicking
+    // the filtered route/depot again or using Clear Filters.
+    return;
   });
   const mapEl=document.getElementById('map');
   mapEl.addEventListener('dragover',e=>e.preventDefault());
@@ -1285,16 +1287,112 @@ function routeLoadTotals(routeId){
     weight:rs.reduce((a,s)=>a+tWeight(s),0)
   };
 }
-function routeCapacityLimits(route){
-  if(!route)return {dryCube:0,frozenCube:0,totalCube:0,weight:0};
-  const drv=trucks.find(d=>d.truckKey===route.truckKey||d.driverKey===route.driverKey)||{};
-  const cap=route.dummyCapacity||{};
-  return {
-    dryCube:parseFloat(cap.dryCube)||parseFloat(drv.dryCubeCapacity)||0,
-    frozenCube:parseFloat(cap.frozenCube)||parseFloat(drv.frozenCubeCapacity)||parseFloat(route.frozenCube)||0,
-    totalCube:parseFloat(cap.totalCube)||parseFloat(drv.totalCubeCapacity)||parseFloat(drv.measure3)||parseFloat(route.cube)||0,
-    weight:parseFloat(cap.weight)||parseFloat(drv.weightCapacity)||parseFloat(drv.measure2)||parseFloat(route.weight)||0
+// V55 — live truck capacity refresh; optimizer logic otherwise unchanged.
+function v55PositiveTruckCapacity(obj){
+  if(!obj)return null;
+  const cap={
+    dryCube:parseFloat(obj.dryCubeCapacity??obj.dryCube)||0,
+    frozenCube:parseFloat(obj.frozenCubeCapacity??obj.frozenCube)||0,
+    totalCube:parseFloat(obj.totalCubeCapacity??obj.totalCube??obj.measure3??obj.cube)||0,
+    weight:parseFloat(obj.weightCapacity??obj.weight??obj.measure2)||0
   };
+  return (cap.dryCube>0||cap.frozenCube>0||cap.totalCube>0||cap.weight>0)?cap:null;
+}
+function v55RegisterTruckCapacity(truckKey,capacity){
+  const key=normalizeKey(truckKey).toUpperCase();
+  const cap=v55PositiveTruckCapacity(capacity);
+  if(!key||!cap)return;
+  truckCapacityRegistry.set('KEY:'+key,cap);
+  const suffix=(typeof scenarioTruckSuffix==='function'?scenarioTruckSuffix(key):'');
+  if(suffix)truckCapacityRegistry.set('SUFFIX:'+suffix,cap);
+}
+function v55CapacityForTruckKey(truckKey){
+  const key=normalizeKey(truckKey).toUpperCase();
+  if(!key)return null;
+
+  // Prefer an explicitly imported/created truck record.
+  const truck=trucks.find(t=>normalizeKey(t.truckKey).toUpperCase()===key);
+  const truckCap=v55PositiveTruckCapacity(truck);
+  if(truckCap)return truckCap;
+
+  // Route Detail imports often provide Truck Defaults separately. Those are
+  // registered by exact key and by suffix.
+  const exact=truckCapacityRegistry.get('KEY:'+key);
+  if(exact)return {...exact};
+  const suffix=(typeof scenarioTruckSuffix==='function'?scenarioTruckSuffix(key):'');
+  const bySuffix=suffix?truckCapacityRegistry.get('SUFFIX:'+suffix):null;
+  if(bySuffix)return {...bySuffix};
+  return null;
+}
+function v55CurrentRouteCapacity(route){
+  if(!route)return {dryCube:0,frozenCube:0,totalCube:0,weight:0};
+
+  const live=v55CapacityForTruckKey(route.truckKey);
+  if(live)return live;
+
+  // A manually created dummy truck intentionally owns its route-level limits.
+  if(/^DUMMY-/i.test(normalizeKey(route.truckKey))){
+    return v55PositiveTruckCapacity(route.dummyCapacity)||{dryCube:0,frozenCube:0,totalCube:0,weight:0};
+  }
+
+  // Only use the imported route-level capacity when the truck has NOT changed.
+  // This prevents a new TruckKey from inheriting the old truck's limits.
+  const importedKey=normalizeKey(route?.routeData?.truckReference?.assignedTruckKey).toUpperCase();
+  const currentKey=normalizeKey(route.truckKey).toUpperCase();
+  if(importedKey && importedKey===currentKey){
+    return v55PositiveTruckCapacity(route.scenarioTruckCapacity)||
+           v55PositiveTruckCapacity(route.dummyCapacity)||
+           {dryCube:0,frozenCube:0,totalCube:0,weight:0};
+  }
+
+  // Standard template/manual routes can still fall back to their explicit
+  // dummy capacity when no imported current truck capacity exists.
+  if(route.sourceType!=='route-data'){
+    return v55PositiveTruckCapacity(route.dummyCapacity)||
+           {dryCube:0,frozenCube:0,totalCube:0,weight:0};
+  }
+
+  return {dryCube:0,frozenCube:0,totalCube:0,weight:0};
+}
+function v55SyncRouteTruckCapacity(route,oldTruckKey=''){
+  if(!route)return;
+  const cap=v55CapacityForTruckKey(route.truckKey);
+  const changed=normalizeKey(oldTruckKey).toUpperCase()!==normalizeKey(route.truckKey).toUpperCase();
+
+  if(cap){
+    // Keep both manifest and optimizer capacity paths on the same live limits.
+    route.scenarioTruckCapacity={totalCube:cap.totalCube||0,weight:cap.weight||0,dryCube:cap.dryCube||0,frozenCube:cap.frozenCube||0};
+    if(route.sourceType==='route-data' || !/^DUMMY-/i.test(normalizeKey(route.truckKey))){
+      route.dummyCapacity={totalCube:cap.totalCube||0,weight:cap.weight||0,dryCube:cap.dryCube||0,frozenCube:cap.frozenCube||0};
+    }
+    if(route.routeData){
+      route.routeData.truckReference=route.routeData.truckReference||{};
+      Object.assign(route.routeData.truckReference,{
+        assignedTruckKey:route.truckKey,
+        truckSuffix:(typeof scenarioTruckSuffix==='function'?scenarioTruckSuffix(route.truckKey):''),
+        cubeCapacity:cap.totalCube||0,
+        weightCapacity:cap.weight||0
+      });
+    }
+    return cap;
+  }
+
+  if(changed && route.sourceType==='route-data'){
+    // Unknown replacement truck: clear stale imported capacity rather than
+    // continuing to warn against the previous truck's limits.
+    route.scenarioTruckCapacity=null;
+    route.dummyCapacity={totalCube:0,weight:0,dryCube:0,frozenCube:0};
+    if(route.routeData?.truckReference){
+      route.routeData.truckReference.assignedTruckKey=route.truckKey;
+      route.routeData.truckReference.truckSuffix=(typeof scenarioTruckSuffix==='function'?scenarioTruckSuffix(route.truckKey):'');
+      route.routeData.truckReference.cubeCapacity=0;
+      route.routeData.truckReference.weightCapacity=0;
+    }
+  }
+  return null;
+}
+function routeCapacityLimits(route){
+  return v55CurrentRouteCapacity(route);
 }
 function routeCapacityWarnings(routeId){
   const route=routes.find(r=>r.id===routeId);
@@ -1310,7 +1408,8 @@ function routeCapacityWarnings(routeId){
 function routeCapacityWarningHtml(routeId){
   const warnings=routeCapacityWarnings(routeId);
   if(!warnings.length)return '';
-  return `<div class="job-result" style="margin:0 0 10px 0;border-color:var(--danger);background:rgba(239,68,68,.16);color:#fecaca;"><strong>Capacity Limit Exceeded:</strong><br/>${warnings.map(w=>`• ${w.label}: ${w.load.toLocaleString(undefined,{maximumFractionDigits:1})} / ${w.cap.toLocaleString(undefined,{maximumFractionDigits:1})} ${w.unit}`).join('<br/>')}</div>`;
+  const route=routes.find(r=>r.id===routeId);
+  return `<div class="job-result" style="margin:0 0 10px 0;border-color:var(--danger);background:rgba(239,68,68,.16);color:#fecaca;"><strong>Capacity Limit Exceeded${route?.truckKey?` — Truck ${escapeHtml(route.truckKey)}`:''}:</strong><br/>${warnings.map(w=>`• ${w.label}: ${w.load.toLocaleString(undefined,{maximumFractionDigits:1})} / ${w.cap.toLocaleString(undefined,{maximumFractionDigits:1})} ${w.unit}`).join('<br/>')}</div>`;
 }
 function haversine(lat1,lng1,lat2,lng2){
   const R=3958.8,dLat=(lat2-lat1)*Math.PI/180,dLng=(lng2-lng1)*Math.PI/180;
@@ -2048,7 +2147,7 @@ function renderRoutes(){
           ondrop="onDropStop(event,'${s.id}','${r.id}')"
           ondragleave="onDragLeave(event)"
           ondragend="onDragEnd()">
-          <span class="s-seq">${s.seq}</span>
+          <span class="s-seq" title="Drag this stop up or down to manually resequence">${s.seq}</span>
           <span class="s-dot" style="background:${color}"></span>
           <div class="s-info">
             <div class="s-name">${customerNameWithCutIdBadges(s,s.customerName)}${s.lockStart?'<span class="tag tag-pref">START LOCK</span>':''}${s.lockFinal?'<span class="tag tag-pref">FINAL LOCK</span>':''}</div>
@@ -2175,7 +2274,7 @@ function renderMap(){
     {
       const label=s.routeId?s.seq:'?';
       icon=L.divIcon({className:'',
-        html:`<div style="width:24px;height:24px;border-radius:50%;background:${color};border:2px solid ${s.routeId?'#fff':'rgba(255,255,255,.35)'};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;font-family:DM Mono,monospace;box-shadow:0 2px 8px rgba(0,0,0,.5);">${label}</div>`,
+        html:`<div style="width:24px;height:24px;border-radius:50%;background:${color};border:2px solid ${s.routeId?'#fff':'rgba(255,255,255,.45)'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:#111318;text-shadow:0 0 2px rgba(255,255,255,.9),0 1px 0 rgba(255,255,255,.7);font-family:DM Mono,monospace;box-shadow:0 2px 8px rgba(0,0,0,.5);">${label}</div>`,
         iconSize:[24,24],iconAnchor:[12,12]});
     }
     const m=L.marker([s.lat,s.lng],{icon,draggable:true}).addTo(map);
@@ -2432,6 +2531,24 @@ function onDragStart(e,sid,fromRoute){dragState={sid,fromRoute};document.getElem
 function onDragEnd(){dragState=null;document.querySelectorAll('.stop-row,.ua-row').forEach(el=>el.classList.remove('dragging','drag-over'));}
 function onDragOver(e,tid){e.preventDefault();if(!dragState||dragState.sid===tid)return;document.getElementById('srow-'+tid)?.classList.add('drag-over');}
 function onDragLeave(e){e.currentTarget.classList.remove('drag-over');}
+function v56ManualInsertStopBefore(draggedStopId,targetStopId,routeId){
+  const routeStops=stops.filter(s=>s.routeId===routeId)
+    .sort((a,b)=>(a.seq||0)-(b.seq||0));
+  const dragged=routeStops.find(s=>s.id===draggedStopId);
+  const target=routeStops.find(s=>s.id===targetStopId);
+  if(!dragged||!target||dragged.id===target.id)return false;
+
+  const ordered=routeStops.filter(s=>s.id!==dragged.id);
+  const targetIndex=ordered.findIndex(s=>s.id===target.id);
+  ordered.splice(Math.max(0,targetIndex),0,dragged);
+
+  // Manual route-window sequencing is intentional. Preserve explicit START /
+  // FINAL route locks while otherwise keeping the exact order the user chose.
+  const locked=orderWithStartFinalLocks(routeId,ordered);
+  locked.forEach((s,i)=>s.seq=i+1);
+  expanded.add(routeId);
+  return true;
+}
 function onDropStop(e,tid,tRoute){
   e.preventDefault();e.stopPropagation();
   if(!dragState)return;
@@ -2447,8 +2564,10 @@ function onDropStop(e,tid,tRoute){
     showToast('Stop moved and route resequenced by distance');
     return;
   }
-  const tmp=s.seq;s.seq=t.seq;t.seq=tmp;
-  reseq();render();showToast('Stop moved');
+  if(v56ManualInsertStopBefore(s.id,t.id,tRoute)){
+    render();
+    showToast('Stop manually resequenced within route');
+  }
 }
 function dropOnRoute(e,rid){
   e.preventDefault();
@@ -2694,7 +2813,9 @@ function saveRouteDetail(){
   r.initialLocationKey=strVal('ed-r-initialLocationKey');
   r.finalLocationKey=strVal('ed-r-finalLocationKey');
   r.driverKey=strVal('ed-r-driverKey');
+  const v55OldTruckKey=r.truckKey||'';
   r.truckKey=strVal('ed-r-truckKey');
+  const v55TruckCapacity=v55SyncRouteTruckCapacity(r,v55OldTruckKey);
   r.trailerKey=strVal('ed-r-trailerKey');
   r.driverFirstName=strVal('ed-r-driverFirstName');
   r.driverLastName=strVal('ed-r-driverLastName');
@@ -2709,8 +2830,17 @@ function saveRouteDetail(){
   enrichRouteDepots();
   expanded.add(r.id);
   render();
+  if(activeManifestRouteId===r.id)renderRouteManifest();
   closeModal('route-detail-modal');
-  showToast('Route template details updated');
+  if(normalizeKey(v55OldTruckKey).toUpperCase()!==normalizeKey(r.truckKey).toUpperCase()){
+    const cap=routeCapacityLimits(r);
+    const capText=(cap.totalCube||cap.weight)
+      ? ` · Limits: ${cap.totalCube?cap.totalCube.toLocaleString()+' cu':'Cube N/A'} / ${cap.weight?cap.weight.toLocaleString()+' lbs':'Weight N/A'}`
+      : ' · No capacity limits found for this truck';
+    showToast(`Truck changed to ${r.truckKey||'blank'}${capText}`);
+  }else{
+    showToast('Route template details updated');
+  }
 }
 function openRouteManifestFromDetail(){
   const routeId=activeDetailRouteId;
@@ -3388,9 +3518,13 @@ function displayAllUnassignedStopsOnMap(){
   mapCleared=true;
   stops.filter(s=>!s.routeId).forEach(s=>visibleStopIds.add(s.id));
   renderMap();
-  fitMapToVisible();
+  // If a route/depot filter is active, preserve its exact zoom/center and only
+  // layer the unassigned markers into the existing view.
+  if(!mapRouteFilterActiveId&&!mapDepotFilterKey)fitMapToVisible();
   updateDisplayToggleButtons();
-  showToast('Displayed all unassigned stops on the map.');
+  showToast(mapRouteFilterActiveId||mapDepotFilterKey
+    ? 'Displayed unassigned stops without changing the filtered map view.'
+    : 'Displayed all unassigned stops on the map.');
 }
 function fitMapToVisible(){
   const pts=[];
@@ -4501,7 +4635,13 @@ function setImportMode(m){
   const hint=document.getElementById('imp-hint');
   if(hint)hint.textContent=hints[importMode];
   const cutPanel=document.getElementById('orders-cutid-filter');
-  if(cutPanel)cutPanel.style.display=importMode==='stops'?'block':'none';
+  if(cutPanel)cutPanel.style.display=(importMode==='stops'||importMode==='all')?'block':'none';
+  const cutModeLabel=document.getElementById('cutid-filter-mode-label');
+  const cutHelp=document.getElementById('cutid-filter-help');
+  if(cutModeLabel)cutModeLabel.textContent=importMode==='all'?'(All Templates — Optional)':'(Orders Only)';
+  if(cutHelp)cutHelp.innerHTML=importMode==='all'
+    ? 'Optional: select the CUTID(s) you want to <strong>include</strong> from the Orders tab. Leave every CUTID unchecked to import all orders.'
+    : 'Select the new cut(s) being added. The full file is still used to remove missing orders and refresh ORDER_STATUS values for orders already in the session.';
   const dayPanel=document.getElementById('route-day-filter');
   if(dayPanel)dayPanel.style.display=importMode==='all'?'block':'none';
   const routeDataDatePanel=document.getElementById('route-data-date-filter');
@@ -4524,6 +4664,14 @@ function getSelectedCutIds(){
 }
 function normalizeCutId(value){
   return sval(value).toUpperCase().replace(/\s+/g,'_');
+}
+function v56RowCutId(row){
+  return normalizeCutId(gcLoose(row,['CUTID','CUT ID','CutId','Cut ID']));
+}
+function v56FilterAllTemplateOrdersByCut(data){
+  const selected=new Set(getSelectedCutIds());
+  if(!selected.size)return data||[];
+  return (data||[]).filter(row=>selected.has(v56RowCutId(row)));
 }
 
 function getSelectedRouteDayCodes(){
@@ -4838,7 +4986,12 @@ function confirmImport(){
         if(type==='depots'){importDepots(data);lc+=data.length;return;}
         if(type==='routes'){rc+=importRoutes(data);return;}
         if(type==='trucks'){importTrucks(data);dc+=data.length;return;}
-        if(type==='stops'){importStops(data);sc+=data.length;return;}
+        if(type==='stops'){
+          const filteredOrders=v56FilterAllTemplateOrdersByCut(data);
+          importStops(filteredOrders);
+          sc+=filteredOrders.length;
+          return;
+        }
         if(type==='reference only'){return;}
         skipped+=data.length;
       });
@@ -5348,6 +5501,7 @@ function importTrucks(data){
       driverKey:(gc(row,['DriverKey','Driver Key'])||'').toString(),
     };
     if(existing)Object.assign(existing,obj); else trucks.push(obj);
+    v55RegisterTruckCapacity(tk,obj);
   });
 }
 
@@ -6616,7 +6770,10 @@ function scenarioRouteLoadProfile(routeId,customerStops=null){
   list.forEach(stop=>{const cube=tCube(stop),weight=tWeight(stop);if(scenarioIsBackhaulStop(stop)){backhaulCube+=cube;backhaulWeight+=weight;}else{deliveryCube+=cube;deliveryWeight+=weight;}});
   return {deliveryCube,deliveryWeight,backhaulCube,backhaulWeight,cube:Math.max(deliveryCube,backhaulCube),weight:Math.max(deliveryWeight,backhaulWeight)};
 }
-function scenarioRouteCapacity(route){const cap=route?.scenarioTruckCapacity||route?.dummyCapacity||{};return {cube:parseFloat(cap.totalCube)||0,weight:parseFloat(cap.weight)||0};}
+function scenarioRouteCapacity(route){
+  const cap=v55CurrentRouteCapacity(route);
+  return {cube:parseFloat(cap.totalCube)||0,weight:parseFloat(cap.weight)||0};
+}
 function scenarioCapacityStatus(route,customerStops=null){
   const load=scenarioRouteLoadProfile(route?.id,customerStops),cap=scenarioRouteCapacity(route);
   const cubeOver=cap.cube>0?Math.max(0,load.cube-cap.cube):0,weightOver=cap.weight>0?Math.max(0,load.weight-cap.weight):0;
@@ -6645,6 +6802,14 @@ function scenarioRecalcStop(stop){
 }
 function importScenarioRouteData(data,routeSummaryRows=[],truckDefaultRows=[]){
   const truckRefs=scenarioBuildTruckCapacityReferences(routeSummaryRows,truckDefaultRows);
+
+  // V55: retain Truck Default capacities for later manual truck changes.
+  (truckDefaultRows||[]).forEach(row=>{
+    const key=sval(gcLoose(row,['TruckKey','Truck Key'])).trim();
+    const cube=scenarioCleanFormula(gcLoose(row,['Cube']));
+    const weight=scenarioCleanFormula(gcLoose(row,['Weight']));
+    if(key&&(cube>0||weight>0))v55RegisterTruckCapacity(key,{totalCube:cube,weight});
+  });
   routes=routes.filter(r=>r.sourceType!=='route-data'); stops=stops.filter(s=>s.sourceType!=='route-data'); depotLocations=depotLocations.filter(d=>d.comment!=='Imported from Route Detail Summary');
   const valid=(data||[]).filter(r=>sval(gcLoose(r,['Resource Key','ResourceKey'])));
   const byRoute=new Map(); valid.forEach(row=>{const key=sval(gcLoose(row,['Resource Key','ResourceKey']));if(!byRoute.has(key))byRoute.set(key,[]);byRoute.get(key).push(row);});
