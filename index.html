@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V62 Isolated Layover Overlay / V61 Foundation</title>
+<title>RouteER - V63 Layover Execution-Order Fix / V62 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -1438,7 +1438,7 @@ body{background:var(--bg0);color:var(--text1);}
 <script>
 
 // ============================================================
-// V62 — Isolated Layover Overlay: ordinary V53/V54 network construction runs first without tagged layover freight; tagged freight is solved afterward only against layover resources. This prevents layover work from distorting normal network mileage/CPM/CPH.\n// V61 — Layover fixes: clean tag control, separate imported baseline vs edited working input, and legal/pre-reserved Layover-only assignment. Ordinary V54/V53 optimization logic unchanged.\n// V60 — Order filters match underlying order rows exactly; table shows only data from matching filtered orders. Optimizer unchanged.\n// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
+// V63 — FINAL layover wrappers are applied after all legacy function declarations so custom layover recognition/runtime/candidate restrictions cannot be overwritten.\n// V62 — Isolated Layover Overlay: ordinary V53/V54 network construction runs first without tagged layover freight; tagged freight is solved afterward only against layover resources. This prevents layover work from distorting normal network mileage/CPM/CPH.\n// V61 — Layover fixes: clean tag control, separate imported baseline vs edited working input, and legal/pre-reserved Layover-only assignment. Ordinary V54/V53 optimization logic unchanged.\n// V60 — Order filters match underlying order rows exactly; table shows only data from matching filtered orders. Optimizer unchanged.\n// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
 // V58 — MANIFEST-STYLE DATA EDITOR LAYOUT ONLY; V57 DATA/LAYOVER LOGIC UNCHANGED.
 // V57 — SCENARIO DATA EDITOR + CUSTOM LAYOVER PLANNING
 // ============================================================
@@ -16999,6 +16999,98 @@ openScenarioAfterActionReport=function(){
     const body=document.getElementById('scenario-report-body');
     const html=scenarioV51ManualImpactHtml(liveRun);
     if(body&&html)body.insertAdjacentHTML('beforeend',html);
+  }
+};
+</script>
+
+
+<script>
+// ============================================================
+// V63 — FINAL LAYOVER OVERRIDES
+// ============================================================
+// IMPORTANT: These wrappers intentionally live at the END of the document.
+// Earlier V57 layover wrappers were defined before legacy optimizer functions;
+// those later legacy declarations silently replaced them. That caused:
+//  1) configured layover routes to be treated like normal routes,
+//  2) normal freight to enter the layover resource,
+//  3) Layover-Only freight to see no configured layover resource,
+//  4) custom multi-day runtime/rest evaluation to never execute.
+// V63 fixes only that execution-order issue. The V53/V54 normal optimizer is
+// otherwise unchanged.
+
+const v63LegacyRouteIsLayover = scenarioRouteIsLayover;
+scenarioRouteIsLayover = function(route){
+  if(!route)return false;
+  if(route.scenarioCustomLayover===true)return true;
+  if(route.scenarioCustomLayover===false)return false;
+  return v63LegacyRouteIsLayover(route);
+};
+
+const v63LegacyCanTargetRoute = scenarioCanTargetRoute;
+scenarioCanTargetRoute = function(stop,route,opts){
+  if(!v63LegacyCanTargetRoute(stop,route,opts))return false;
+  const tagged = stop?.scenarioLayoverOnly===true ||
+    (Array.isArray(stop?.orders)&&stop.orders.length>0&&stop.orders.every(o=>o?.scenarioLayoverOnly===true));
+  const layoverRoute = scenarioRouteIsLayover(route);
+
+  // Complete isolation:
+  // - tagged freight -> layover routes only
+  // - ordinary freight -> normal routes only
+  if(tagged&&!layoverRoute)return false;
+  if(!tagged&&layoverRoute)return false;
+  return true;
+};
+
+const v63LegacyEvaluateOrderedRoute = scenarioEvaluateOrderedRoute;
+scenarioEvaluateOrderedRoute = function(route,rs,startEpoch){
+  if(route?.scenarioCustomLayover===true&&route?.scenarioLayoverPlan){
+    return scenarioV57EvaluateCustomLayover(route,rs,startEpoch);
+  }
+  const sim=v63LegacyEvaluateOrderedRoute(route,rs,startEpoch);
+  if(sim)sim.routeId=route?.id||null;
+  return sim;
+};
+
+const v63LegacyLayoverRuntimeOk = scenarioLayoverRuntimeOk;
+scenarioLayoverRuntimeOk = function(sim){
+  if(!sim)return false;
+  const route=sim.routeId?routes.find(r=>r.id===sim.routeId):null;
+  const p=route?.scenarioLayoverPlan;
+  if(route?.scenarioCustomLayover===true&&p){
+    const daily=Math.max(.25,+p.dailyRunHours||10);
+    const days=Math.max(1,Math.round(+p.days||2));
+    const segs=Array.isArray(sim.segmentHours)?sim.segmentHours:[];
+    return segs.length<=days &&
+      segs.every(h=>(+h||0)<=daily+1e-6) &&
+      (+sim.hours||0)<=daily*days+1e-6;
+  }
+  return v63LegacyLayoverRuntimeOk(sim);
+};
+
+// Keep the mileage optimizer from using layover routes as ordinary donor/source
+// territory. Tagged layover freight is handled by the isolated overlay instead.
+const v63MileagePass = scenarioV52MileagePass;
+scenarioV52MileagePass = async function(opts,stats,maxEvaluations,serviceFloor,retentionFloor){
+  // Temporarily mark layover routes as protected from the ordinary mileage pass.
+  const marked=[];
+  for(const r of routes){
+    if(scenarioRouteIsLayover(r)){
+      marked.push([r, r.scenarioV63MileageProtected]);
+      r.scenarioV63MileageProtected=true;
+    }
+  }
+  const oldProtected=scenarioRouteIsProtectedLongHaul;
+  scenarioRouteIsProtectedLongHaul=function(route){
+    return route?.scenarioV63MileageProtected===true || oldProtected(route);
+  };
+  try{
+    return await v63MileagePass(opts,stats,maxEvaluations,serviceFloor,retentionFloor);
+  }finally{
+    scenarioRouteIsProtectedLongHaul=oldProtected;
+    marked.forEach(([r,old])=>{
+      if(old===undefined)delete r.scenarioV63MileageProtected;
+      else r.scenarioV63MileageProtected=old;
+    });
   }
 };
 </script>
