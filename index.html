@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V60 Accurate Data Filters / V59 Foundation</title>
+<title>RouteER - V62 Isolated Layover Overlay / V61 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -685,6 +685,57 @@ body{background:var(--bg0);color:var(--text1);}
 }
 </style>
 
+
+<style>
+/* V61 — Layover tag presentation only */
+#scenario-order-layover-modal .layover-tag-panel{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:18px;
+  padding:11px 12px;
+  border:1px solid var(--border2);
+  border-radius:8px;
+  background:var(--bg2);
+}
+#scenario-order-layover-modal .layover-tag-copy{
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+#scenario-order-layover-modal .layover-tag-copy strong{
+  font-size:11px;
+  color:var(--text1);
+}
+#scenario-order-layover-modal .layover-tag-copy span{
+  font-size:9px;
+  line-height:1.35;
+  color:var(--text3);
+}
+#scenario-order-layover-modal .layover-tag-control{
+  flex:0 0 auto;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-height:34px;
+  padding:6px 10px;
+  border:1px solid var(--border2);
+  border-radius:7px;
+  background:var(--bg3);
+  color:var(--text1);
+  font-size:10px;
+  font-weight:800;
+  cursor:pointer;
+}
+#scenario-order-layover-modal .layover-tag-control input{
+  width:16px;
+  height:16px;
+  margin:0;
+  accent-color:var(--accent);
+}
+</style>
+
 </head>
 <body>
 
@@ -1342,7 +1393,16 @@ body{background:var(--bg0);color:var(--text1);}
     <div class="data-edit-layover-grid">
       <div class="field"><label>Earliest Time Window Imported (Date & Time)</label><input id="de-lo-early" type="datetime-local"/></div>
       <div class="field"><label>Latest Time Window Imported (Date & Time)</label><input id="de-lo-late" type="datetime-local"/></div>
-      <div class="field" style="grid-column:1/-1;"><label class="data-edit-mini-toggle"><input id="de-lo-tag" type="checkbox" checked/> <strong>Tag as Layover</strong> — optimizer may place these orders on Layover routes only.</label></div>
+      <div class="layover-tag-panel" style="grid-column:1/-1;">
+        <div class="layover-tag-copy">
+          <strong>Tag as Layover</strong>
+          <span>When enabled, these selected orders can only be assigned to a route configured as a Layover route.</span>
+        </div>
+        <label class="layover-tag-control">
+          <input id="de-lo-tag" type="checkbox" checked/>
+          <span>Layover Only</span>
+        </label>
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal('scenario-order-layover-modal')">Cancel</button>
@@ -1378,7 +1438,7 @@ body{background:var(--bg0);color:var(--text1);}
 <script>
 
 // ============================================================
-// V60 — Order filters match underlying order rows exactly; table shows only data from matching filtered orders. Optimizer unchanged.\n// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
+// V62 — Isolated Layover Overlay: ordinary V53/V54 network construction runs first without tagged layover freight; tagged freight is solved afterward only against layover resources. This prevents layover work from distorting normal network mileage/CPM/CPH.\n// V61 — Layover fixes: clean tag control, separate imported baseline vs edited working input, and legal/pre-reserved Layover-only assignment. Ordinary V54/V53 optimization logic unchanged.\n// V60 — Order filters match underlying order rows exactly; table shows only data from matching filtered orders. Optimizer unchanged.\n// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
 // V58 — MANIFEST-STYLE DATA EDITOR LAYOUT ONLY; V57 DATA/LAYOVER LOGIC UNCHANGED.
 // V57 — SCENARIO DATA EDITOR + CUSTOM LAYOVER PLANNING
 // ============================================================
@@ -1792,9 +1852,9 @@ function scenarioDataEditorApply(){
   }
   scenarioDataEditorRender();
   if(scenarioBaseline){
-    // Edits are intentional scenario-source changes. Update the current baseline
-    // so a subsequent Run Model does not restore the pre-edit values.
-    scenarioBaseline=captureScenarioBaseline();
+    // V61: edits are optimization-input changes, NOT a replacement for the
+    // imported comparison baseline. Preserve both independently.
+    scenarioCaptureEditedInputSnapshot();
     scenarioLastRun=null;
   }
 }
@@ -1833,7 +1893,7 @@ function scenarioSaveRouteLayoverPlan(){
     }
   });
   closeModal('scenario-route-layover-modal');scenarioDataEditorRender();
-  if(scenarioBaseline){scenarioBaseline=captureScenarioBaseline();scenarioLastRun=null;}
+  if(scenarioBaseline){scenarioCaptureEditedInputSnapshot();scenarioLastRun=null;}
   showToast(`${selected.length} route(s) ${enabled?'configured as layover':'removed from custom layover'}`);
 }
 function scenarioOpenOrderLayoverPlan(){
@@ -1865,7 +1925,7 @@ function scenarioSaveOrderLayoverPlan(){
     }
   });
   closeModal('scenario-order-layover-modal');scenarioDataEditorRender();
-  if(scenarioBaseline){scenarioBaseline=captureScenarioBaseline();scenarioLastRun=null;}
+  if(scenarioBaseline){scenarioCaptureEditedInputSnapshot();scenarioLastRun=null;}
   showToast(`${selected.length} order stop(s) ${tag?'tagged Layover Only':'removed from Layover Only'}`);
 }
 
@@ -2048,6 +2108,9 @@ let lassoMode=false, lassoDragging=false, lassoStartPoint=null;
 let lassoSelectedStopIds=new Set();
 let currentOrderStatusFilter='ALL';
 let scenarioBaseline=null;
+// V61: preserves user edits from Scenario > Edit Data without overwriting the
+// authoritative imported baseline used by the After Action Report.
+let scenarioEditedInputSnapshot=null;
 let scenarioLastRun=null;
 // V55: live truck-capacity lookup used by route manifest warnings and scenario feasibility.
 // Keys are stored by exact TruckKey and by capacity suffix so changing a route's truck
@@ -5881,6 +5944,7 @@ function confirmImport(){
       routeDataImportSummary=summary;
       rc=summary.routes; sc=summary.stops; lc=summary.depots;
       scenarioBaseline=captureScenarioBaseline();
+      scenarioEditedInputSnapshot=null;
       scenarioLastRun=null;
     }else if(importMode==='stops'){
       const selectedCutIds=getSelectedCutIds();
@@ -7778,14 +7842,31 @@ function scenarioClone(value){return JSON.parse(JSON.stringify(value));}
 function captureScenarioBaseline(){
   const snapshot={routes:scenarioClone(routes),stops:scenarioClone(stops),depots:scenarioClone(depotLocations),capturedAt:new Date().toISOString()}; snapshot.metrics=scenarioComputeBaselineMetrics(snapshot.routes,snapshot.stops); return snapshot;
 }
+function scenarioCaptureEditedInputSnapshot(){
+  if(!scenarioBaseline)return null;
+  scenarioEditedInputSnapshot={
+    routes:scenarioClone(routes),
+    stops:scenarioClone(stops),
+    depots:scenarioClone(depotLocations),
+    capturedAt:new Date().toISOString()
+  };
+  return scenarioEditedInputSnapshot;
+}
 function restoreScenarioBaseline(){
-  if(!scenarioBaseline)return false; routes=scenarioClone(scenarioBaseline.routes); stops=scenarioClone(scenarioBaseline.stops); depotLocations=scenarioClone(scenarioBaseline.depots); enrichRouteDepots(); reseq(); return true;
+  const source=scenarioEditedInputSnapshot||scenarioBaseline;
+  if(!source)return false;
+  routes=scenarioClone(source.routes);
+  stops=scenarioClone(source.stops);
+  depotLocations=scenarioClone(source.depots);
+  enrichRouteDepots();
+  reseq();
+  return true;
 }
 function scenarioIgnoreValues(){
   const source=scenarioBaseline?.stops||stops; const vals=[]; source.forEach(s=>(s.orders||[]).forEach(o=>{if(sval(o.ignoreType))vals.push(sval(o.ignoreType));})); return [...new Set(vals)].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
 }
 function openScenarioLevers(){
-  if(!scenarioBaseline&&routes.some(r=>r.sourceType==='route-data'))scenarioBaseline=captureScenarioBaseline();
+  if(!scenarioBaseline&&routes.some(r=>r.sourceType==='route-data')){scenarioBaseline=captureScenarioBaseline();scenarioEditedInputSnapshot=null;}
   if(!scenarioBaseline){showToast('Import a Route Detail Summary with Import Route Data first.');return;}
   const box=document.getElementById('scenario-ignore-values'); const prior=new Set(Array.from(document.querySelectorAll('.scenario-ignore-chk:checked')).map(x=>x.value));
   box.innerHTML=scenarioIgnoreValues().map(v=>`<label class="scenario-check"><input class="scenario-ignore-chk" type="checkbox" value="${escapeHtml(v)}" ${prior.has(v)?'checked':''}/> ${escapeHtml(v)}</label>`).join('')||'<span style="font-size:10px;color:var(--text3);">No Ignore values found.</span>';
@@ -11173,10 +11254,32 @@ function scenarioV31CommitPlacement(stop,best){
   }
 }
 function scenarioV31CandidateRoutesForStop(stop,opts,preferredRoute=null){
-  const arr=routes.filter(r=>!scenarioRouteIsProtectedLongHaul(r)&&!scenarioRouteIsLayover(r)&&scenarioCanTargetRoute(stop,r,opts));
+  const layoverOnly=stop?.scenarioLayoverOnly===true ||
+    (Array.isArray(stop?.orders)&&stop.orders.length>0&&stop.orders.every(o=>o?.scenarioLayoverOnly===true));
+
+  // V61: legacy Full Model explicitly excluded every layover route here.
+  // Tagged layover orders therefore had ZERO legal resources and always ended
+  // Unassigned. Tagged stops now see layover routes only; normal stops retain
+  // the previous non-layover candidate behavior.
+  const arr=routes.filter(r=>{
+    if(scenarioRouteIsProtectedLongHaul(r))return false;
+    const isLayover=scenarioRouteIsLayover(r);
+    if(layoverOnly&&!isLayover)return false;
+    if(!layoverOnly&&isLayover)return false;
+    return scenarioCanTargetRoute(stop,r,opts);
+  });
+
   const depKey=scenarioV30GroupDepot(stop,opts);
   let filtered=opts.keepAssignedDepot?arr.filter(r=>scenarioRoutePrimaryDepotKey(r)===depKey):arr;
-  if(preferredRoute&&filtered.some(r=>r.id===preferredRoute.id))filtered=[preferredRoute,...filtered.filter(r=>r.id!==preferredRoute.id)];
+
+  // Preferred Resource is honored first when it identifies an eligible route.
+  const prefKey=sval(stop?.preferredResourceKey).toUpperCase();
+  const preferredByKey=prefKey?filtered.find(r=>
+    [r.udfNumber1,r.name,r.routeTemplateKey,r.routeData?.resourceKey]
+      .some(v=>sval(v).toUpperCase()===prefKey)
+  ):null;
+  const preferred=preferredRoute&&filtered.some(r=>r.id===preferredRoute.id)?preferredRoute:preferredByKey;
+  if(preferred)filtered=[preferred,...filtered.filter(r=>r.id!==preferred.id)];
   return filtered;
 }
 function scenarioV31PlaceStops(stopsToPlace,opts,preferredRouteMap=null,relaxed=false,stats=null){
@@ -15910,7 +16013,7 @@ const scenarioV47ReportBase=scenarioV27NetworkAnalysisHtml;
 scenarioV27NetworkAnalysisHtml=function(r){
   const html=scenarioV47ReportBase(r);if(r?.optimizerVersion!=='V47 Bounded Service Repair - V44 Foundation')return html;
   const n=r.removed?.networkAnalysis||{},rec=n.v42Recovery||{},rec2=n.v47SecondRecovery||{},m=r.modeled||{},target=+r.options?.targetOnTimePct||95,fg=r.removed?.freightIntegrityGate||{};
-  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V47 Bounded Service Repair — V44 Foundation</h3><div class="scenario-help">V47 freezes the successful V44 scratch/efficiency foundation. It adds only a checkpointed service-repair pass capped at +5% network miles and a second freight-recovery attempt after service-aware resequencing. A repair that exceeds the mileage budget, loses freight, or creates a hard feasibility failure is rolled back. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${n.v47ServiceRepairAccepted?'YES':'NO'}</div><div class="l">Service Repair Committed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v47MilesBefore||0,1)} → ${scenarioFmt(n.v47MilesAfter||0,1)}</div><div class="l">Repair Miles Checkpoint</div></div></div><div class="scenario-note"><strong>Service checkpoint:</strong> ${scenarioFmt(n.v47ServiceBefore||0,1)}% → ${scenarioFmt(n.v47ServiceAfter||0,1)}% · <strong>Allowed mileage growth:</strong> ${scenarioFmt(n.v47MileageBudgetPct||5,1)}%${n.v47RepairRejectedReason?` · <strong>Repair rollback reason:</strong> ${escapeHtml(n.v47RepairRejectedReason)}`:''} · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>V54 surgical recovery:</strong> ${n.v54Recovery?.remainingBefore||0} → ${n.v54Recovery?.remainingAfter||0}${n.v54Recovery?.rolledBack?` (ROLLED BACK: ${escapeHtml(n.v54Recovery.reason||'guardrail')})`:` (${n.v54Recovery?.direct||0} direct, ${n.v54Recovery?.ejection||0} ejection; ${scenarioFmt(n.v54Recovery?.addedMiles||0,1)} mi)`} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
+  return html+`<div class="scenario-card" style="margin-top:10px;border-color:${(!fg.failed&&m.onTimePct>=target)?'rgba(62,207,142,.7)':'rgba(245,158,11,.8)'};"><h3>V47 Bounded Service Repair — V44 Foundation</h3><div class="scenario-help">V47 freezes the successful V44 scratch/efficiency foundation. It adds only a checkpointed service-repair pass capped at +5% network miles and a second freight-recovery attempt after service-aware resequencing. A repair that exceeds the mileage budget, loses freight, or creates a hard feasibility failure is rolled back. Lite ReOp is unchanged.</div><div class="scenario-kpi-grid" style="margin:9px 0 6px;grid-template-columns:repeat(4,minmax(0,1fr));"><div class="scenario-kpi"><div class="v">${scenarioFmt(fg.pct||0,1)}%</div><div class="l">Freight Retained</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(m.onTimePct||0,1)}%</div><div class="l">On-Time vs ${scenarioFmt(target,1)}%</div></div><div class="scenario-kpi"><div class="v">${n.v47ServiceRepairAccepted?'YES':'NO'}</div><div class="l">Service Repair Committed</div></div><div class="scenario-kpi"><div class="v">${scenarioFmt(n.v47MilesBefore||0,1)} → ${scenarioFmt(n.v47MilesAfter||0,1)}</div><div class="l">Repair Miles Checkpoint</div></div></div><div class="scenario-note"><strong>Service checkpoint:</strong> ${scenarioFmt(n.v47ServiceBefore||0,1)}% → ${scenarioFmt(n.v47ServiceAfter||0,1)}% · <strong>Allowed mileage growth:</strong> ${scenarioFmt(n.v47MileageBudgetPct||5,1)}%${n.v47RepairRejectedReason?` · <strong>Repair rollback reason:</strong> ${escapeHtml(n.v47RepairRejectedReason)}`:''} · <strong>Freight recovery #1:</strong> ${rec.initial||0} → ${rec.final||0} · <strong>Freight recovery #2:</strong> ${rec2.initial||0} → ${rec2.final||0} · <strong>V54 surgical recovery:</strong> ${n.v54Recovery?.remainingBefore||0} → ${n.v54Recovery?.remainingAfter||0}${n.v54Recovery?.rolledBack?` (ROLLED BACK: ${escapeHtml(n.v54Recovery.reason||'guardrail')})`:` (${n.v54Recovery?.direct||0} direct, ${n.v54Recovery?.ejection||0} ejection; ${scenarioFmt(n.v54Recovery?.addedMiles||0,1)} mi)`} · <strong>V62 isolated layover tagged / placed / unassigned:</strong> ${r?.removed?.scratchBuild?.v61LayoverTagged||0} / ${r?.removed?.scratchBuild?.v61LayoverPlaced||0} / ${r?.removed?.scratchBuild?.v61LayoverUnassigned||0} · <strong>Deterministic evaluation budget:</strong> ${(n.v52EvaluationBudget||0).toLocaleString()} (${n.v52EvaluationBudgetReached?'reached':'completed early'}) · <strong>Total runtime:</strong> ${scenarioFmt(n.runtimeSeconds||0,1)} sec.</div></div>`;
 };
 </script>
 
@@ -16221,8 +16324,26 @@ async function scenarioV53Build(opts){
   pool.forEach(s=>{s.scenarioV43SourceRouteId=s.routeId||s.scenarioV43SourceRouteId||null;s.routeId=null;s.seq=0;if(/^Build From Scratch:/i.test(s.scenarioRemovedReason||''))s.scenarioRemovedReason='';});
   routes.forEach(r=>{delete r.scenarioDispatchEpoch;r.earliestStartTime=scenarioTime(r.routeData?.routeStart||r.routeSummaryStart)||r.earliestStartTime;});
 
+  // V62 — isolate tagged layover freight from ordinary scratch construction.
+  // It is deliberately NOT placed yet. The normal mileage-efficient network is
+  // built first, so layover configuration cannot change normal route seeding,
+  // territory growth, route activation, CPM, or cases/man-hour.
+  const v61TaggedLayover=pool.filter(s=>s.scenarioLayoverOnly===true)
+    .sort((a,b)=>{
+      const pa=sval(a.preferredResourceKey),pb=sval(b.preferredResourceKey);
+      const p=pa.localeCompare(pb,undefined,{numeric:true,sensitivity:'base'});
+      return p||scenarioV53CmpKey(a,b,scenarioV53StopKey);
+    });
+  stats.v61LayoverTagged=v61TaggedLayover.length;
+  stats.v61LayoverPlaced=0;
+  stats.v61LayoverUnassigned=0;
+  stats.v62LayoverOverlay=true;
+
   const groups=new Map();
-  for(const s of pool){const k=scenarioV42DepotKey(s,opts);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);}
+  for(const s of pool){
+    if(s.scenarioLayoverOnly===true)continue;
+    const k=scenarioV42DepotKey(s,opts);if(!groups.has(k))groups.set(k,[]);groups.get(k).push(s);
+  }
   const groupEntries=[...groups.entries()].sort((a,b)=>String(a[0]).localeCompare(String(b[0]),undefined,{numeric:true,sensitivity:'base'}));
   let totalDone=0;
 
@@ -16303,7 +16424,7 @@ async function scenarioV53Build(opts){
     }
   }
 
-  let unplaced=pool.filter(s=>!s.routeId).sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53StopKey)),done=0;
+  let unplaced=pool.filter(s=>!s.routeId&&s.scenarioLayoverOnly!==true).sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53StopKey)),done=0;
   for(const s of [...unplaced]){
     const rs=scenarioV39EligibleRoutes(s,opts,'').slice().sort((a,b)=>{
       const d=scenarioV39CheapRouteScore(a,s)-scenarioV39CheapRouteScore(b,s);
@@ -16318,6 +16439,43 @@ async function scenarioV53Build(opts){
     if(scenarioV44Commit(s,best)){stats.initialPlacedStops++;stats.difficultFirstPlacements++;}
     done++;
     if(done%2===0){scenarioV39Progress('Completing deterministic freight placement…',`${done}/${unplaced.length} difficult stop(s) reviewed`);await scenarioV39Yield();}
+  }
+
+  // V62 — POST-NETWORK LAYOVER OVERLAY.
+  // At this point the ordinary V53 mileage-efficient network is already built.
+  // Only explicitly tagged freight is now considered, and only configured/
+  // imported layover resources are legal. No normal-route assignment is moved.
+  for(const s of v61TaggedLayover){
+    if(s.routeId)continue;
+    const candidates=scenarioV31CandidateRoutesForStop(s,opts,null)
+      .filter(r=>scenarioRouteIsLayover(r))
+      .sort((a,b)=>scenarioV53CmpKey(a,b,scenarioV53RouteKey));
+    let best=null;
+    for(const r of candidates){
+      const c=scenarioV53Insertion(s,r,opts,true);
+      stats.routeTests++;
+      if(!c)continue;
+      const pref=sval(s.preferredResourceKey).toUpperCase();
+      const isPreferred=pref&&[r.udfNumber1,r.name,r.routeTemplateKey,r.routeData?.resourceKey]
+        .some(v=>sval(v).toUpperCase()===pref);
+      // Preferred Resource breaks ties/strongly guides placement, but the
+      // candidate still has to pass layover runtime and capacity feasibility.
+      const score=(+c.score||0)-(isPreferred?1e12:0);
+      if(!best||score<best._v62Score-1e-7||
+         (Math.abs(score-best._v62Score)<=1e-7&&scenarioV53CmpKey(c.route,best.route,scenarioV53RouteKey)<0)){
+        c._v62Score=score;best=c;
+      }
+    }
+    if(scenarioV44Commit(s,best)){
+      stats.v61LayoverPlaced++;
+      stats.initialPlacedStops++;
+      stats.difficultFirstPlacements++;
+    }else{
+      stats.v61LayoverUnassigned++;
+      s.routeId=null;s.seq=0;
+      s.scenarioRemovedReason='Layover Only: no configured layover route can accept this stop within capacity/runtime rules';
+    }
+    await scenarioV39Yield();
   }
 
   unplaced=pool.filter(s=>!s.routeId);
