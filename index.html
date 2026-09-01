@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V59 Data Editor Fixes / V58 Foundation</title>
+<title>RouteER - V60 Accurate Data Filters / V59 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -1378,7 +1378,7 @@ body{background:var(--bg0);color:var(--text1);}
 <script>
 
 // ============================================================
-// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
+// V60 — Order filters match underlying order rows exactly; table shows only data from matching filtered orders. Optimizer unchanged.\n// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
 // V58 — MANIFEST-STYLE DATA EDITOR LAYOUT ONLY; V57 DATA/LAYOVER LOGIC UNCHANGED.
 // V57 — SCENARIO DATA EDITOR + CUSTOM LAYOVER PLANNING
 // ============================================================
@@ -1475,16 +1475,77 @@ function deRouteRows(){
   );
 }
 function deOrderRows(){
-  return stops.filter(s=>!scenarioIsFixedRouteAnchor(s)).filter(s=>
-    deFilterMatch('orders','customer',s.customerName||'')&&
-    deFilterMatch('orders','customerNumber',s.customerNumber||s.shipToId||s.locationKey||'')&&
-    deFilterMatch('orders','preferredResource',s.preferredResourceKey||'')&&
-    deFilterMatch('orders','preferredSequence',String(s.preferredRouteSequence||''))&&
-    deFilterMatch('orders','earlyTime',deTimeOnly(s.earliestTimeWindowRaw||s.earliestTimeWindow))&&
-    deFilterMatch('orders','lateTime',deTimeOnly(s.latestTimeWindowRaw||s.latestTimeWindow))&&
-    deFilterMatch('orders','earlyImported',rawImportedDateTime(s.earliestTimeWindowRaw||''))
-  );
+  const selectedCustomer=deFilterValues('orders','customer');
+  const selectedCustomerNumber=deFilterValues('orders','customerNumber');
+  const selectedPreferredResource=deFilterValues('orders','preferredResource');
+  const selectedPreferredSequence=deFilterValues('orders','preferredSequence');
+  const selectedEarlyTime=deFilterValues('orders','earlyTime');
+  const selectedLateTime=deFilterValues('orders','lateTime');
+  const selectedEarlyImported=deFilterValues('orders','earlyImported');
+
+  return stops.filter(s=>!scenarioIsFixedRouteAnchor(s)).filter(s=>{
+    const orderRows=Array.isArray(s.orders)&&s.orders.length?s.orders:[s];
+    return orderRows.some(o=>{
+      const customer=(o.customerName||s.customerName||'').toString();
+      const customerNumber=(o.customerNumber||o.shipToId||o.locationKey||s.customerNumber||s.shipToId||s.locationKey||'').toString();
+      const preferredResource=(o.preferredResourceKey||'').toString();
+      const preferredSequence=String(o.preferredRouteSequence||'');
+      const earlyRaw=o.earliestTimeWindowRaw||s.earliestTimeWindowRaw||o.earliestTimeWindow||s.earliestTimeWindow||'';
+      const lateRaw=o.latestTimeWindowRaw||s.latestTimeWindowRaw||o.latestTimeWindow||s.latestTimeWindow||'';
+      const earlyTime=deTimeOnly(earlyRaw);
+      const lateTime=deTimeOnly(lateRaw);
+      const earlyImported=rawImportedDateTime(o.earliestTimeWindowRaw||s.earliestTimeWindowRaw||'');
+
+      return (!selectedCustomer.size||selectedCustomer.has(customer)) &&
+             (!selectedCustomerNumber.size||selectedCustomerNumber.has(customerNumber)) &&
+             (!selectedPreferredResource.size||selectedPreferredResource.has(preferredResource)) &&
+             (!selectedPreferredSequence.size||selectedPreferredSequence.has(preferredSequence)) &&
+             (!selectedEarlyTime.size||selectedEarlyTime.has(earlyTime)) &&
+             (!selectedLateTime.size||selectedLateTime.has(lateTime)) &&
+             (!selectedEarlyImported.size||selectedEarlyImported.has(earlyImported));
+    });
+  });
 }
+
+function deMatchingUnderlyingOrders(stop){
+  const selectedCustomer=deFilterValues('orders','customer');
+  const selectedCustomerNumber=deFilterValues('orders','customerNumber');
+  const selectedPreferredResource=deFilterValues('orders','preferredResource');
+  const selectedPreferredSequence=deFilterValues('orders','preferredSequence');
+  const selectedEarlyTime=deFilterValues('orders','earlyTime');
+  const selectedLateTime=deFilterValues('orders','lateTime');
+  const selectedEarlyImported=deFilterValues('orders','earlyImported');
+  const orderRows=Array.isArray(stop?.orders)&&stop.orders.length?stop.orders:[stop];
+
+  return orderRows.filter(o=>{
+    const customer=(o.customerName||stop.customerName||'').toString();
+    const customerNumber=(o.customerNumber||o.shipToId||o.locationKey||stop.customerNumber||stop.shipToId||stop.locationKey||'').toString();
+    const preferredResource=(o.preferredResourceKey||'').toString();
+    const preferredSequence=String(o.preferredRouteSequence||'');
+    const earlyRaw=o.earliestTimeWindowRaw||stop.earliestTimeWindowRaw||o.earliestTimeWindow||stop.earliestTimeWindow||'';
+    const lateRaw=o.latestTimeWindowRaw||stop.latestTimeWindowRaw||o.latestTimeWindow||stop.latestTimeWindow||'';
+    const earlyTime=deTimeOnly(earlyRaw);
+    const lateTime=deTimeOnly(lateRaw);
+    const earlyImported=rawImportedDateTime(o.earliestTimeWindowRaw||stop.earliestTimeWindowRaw||'');
+
+    return (!selectedCustomer.size||selectedCustomer.has(customer)) &&
+           (!selectedCustomerNumber.size||selectedCustomerNumber.has(customerNumber)) &&
+           (!selectedPreferredResource.size||selectedPreferredResource.has(preferredResource)) &&
+           (!selectedPreferredSequence.size||selectedPreferredSequence.has(preferredSequence)) &&
+           (!selectedEarlyTime.size||selectedEarlyTime.has(earlyTime)) &&
+           (!selectedLateTime.size||selectedLateTime.has(lateTime)) &&
+           (!selectedEarlyImported.size||selectedEarlyImported.has(earlyImported));
+  });
+}
+function deOrderImportedSourceRows(stop){
+  const matching=deMatchingUnderlyingOrders(stop);
+  const raws=[];
+  matching.forEach(o=>{if(o?.raw&&typeof o.raw==='object')raws.push(o.raw);});
+  if(!raws.length&&matching.length===0)return [];
+  if(!raws.length&&stop?.raw&&typeof stop.raw==='object')raws.push(stop.raw);
+  return raws;
+}
+
 function deApplyFieldCard(applyId,label,inputHtml){
   return `<div class="data-edit-card"><label class="data-edit-apply"><input id="${applyId}" type="checkbox"/> Apply</label><div class="data-edit-card-title">${deEsc(label)}</div>${inputHtml}</div>`;
 }
@@ -1527,15 +1588,19 @@ function scenarioDataEditorFiltersHtml(){
       deFilterDropdown('routes','final','Final Locations',routes.map(r=>r.finalLocationKey||''))
     ].join('');
   }
-  const rows=stops.filter(s=>!scenarioIsFixedRouteAnchor(s));
+  const orderRows=[];
+  stops.filter(s=>!scenarioIsFixedRouteAnchor(s)).forEach(s=>{
+    const rows=Array.isArray(s.orders)&&s.orders.length?s.orders:[s];
+    rows.forEach(o=>orderRows.push({o,s}));
+  });
   return [
-    deFilterDropdown('orders','customer','Customer Name',rows.map(s=>s.customerName||'')),
-    deFilterDropdown('orders','customerNumber','Customer Number',rows.map(s=>s.customerNumber||s.shipToId||s.locationKey||'')),
-    deFilterDropdown('orders','preferredResource','Preferred Resource',rows.map(s=>s.preferredResourceKey||'')),
-    deFilterDropdown('orders','preferredSequence','Preferred Sequence',rows.map(s=>String(s.preferredRouteSequence||''))),
-    deFilterDropdown('orders','earlyTime','Earliest Time',rows.map(s=>deTimeOnly(s.earliestTimeWindowRaw||s.earliestTimeWindow))),
-    deFilterDropdown('orders','lateTime','Latest Time',rows.map(s=>deTimeOnly(s.latestTimeWindowRaw||s.latestTimeWindow))),
-    deFilterDropdown('orders','earlyImported','Earliest Imported',rows.map(s=>rawImportedDateTime(s.earliestTimeWindowRaw||'')))
+    deFilterDropdown('orders','customer','Customer Name',orderRows.map(x=>x.o.customerName||x.s.customerName||'')),
+    deFilterDropdown('orders','customerNumber','Customer Number',orderRows.map(x=>x.o.customerNumber||x.o.shipToId||x.o.locationKey||x.s.customerNumber||x.s.shipToId||x.s.locationKey||'')),
+    deFilterDropdown('orders','preferredResource','Preferred Resource',orderRows.map(x=>x.o.preferredResourceKey||'')),
+    deFilterDropdown('orders','preferredSequence','Preferred Sequence',orderRows.map(x=>String(x.o.preferredRouteSequence||''))),
+    deFilterDropdown('orders','earlyTime','Earliest Time',orderRows.map(x=>deTimeOnly(x.o.earliestTimeWindowRaw||x.s.earliestTimeWindowRaw||x.o.earliestTimeWindow||x.s.earliestTimeWindow))),
+    deFilterDropdown('orders','lateTime','Latest Time',orderRows.map(x=>deTimeOnly(x.o.latestTimeWindowRaw||x.s.latestTimeWindowRaw||x.o.latestTimeWindow||x.s.latestTimeWindow))),
+    deFilterDropdown('orders','earlyImported','Earliest Imported',orderRows.map(x=>rawImportedDateTime(x.o.earliestTimeWindowRaw||x.s.earliestTimeWindowRaw||'')))
   ].join('');
 }
 
@@ -1573,7 +1638,7 @@ function deImportedColumns(kind,rows){
       if(key&&!seen.has(key)){seen.add(key);keys.push(key);}
     }));
   }else{
-    rows.forEach(s=>deOrderRawRows(s).forEach(raw=>Object.keys(raw||{}).forEach(k=>{
+    rows.forEach(s=>deOrderImportedSourceRows(s).forEach(raw=>Object.keys(raw||{}).forEach(k=>{
       const key=String(k||'').trim();
       if(key&&!seen.has(key)){seen.add(key);keys.push(key);}
     })));
@@ -1584,7 +1649,7 @@ function deImportedRouteValue(route,key){
   return deRawScalar(deRouteImportedSource(route)?.[key]);
 }
 function deImportedOrderValue(stop,key){
-  const vals=deOrderRawRows(stop)
+  const vals=deOrderImportedSourceRows(stop)
     .map(raw=>deRawScalar(raw?.[key]))
     .filter(v=>v!=='');
   return deUnique(vals).join(' | ');
@@ -1616,7 +1681,7 @@ function scenarioDataEditorTableHtml(){
   }
 
   const rows=deOrderRows();
-  const cols=deImportedColumns('orders',stops.filter(s=>!scenarioIsFixedRouteAnchor(s)));
+  const cols=deImportedColumns('orders',rows);
   const style=deRowStyleForColumns(cols.length);
   return `<div class="data-edit-row orders header" style="${style}"><div></div>${cols.map(c=>deTableCell(c)).join('')}</div>`+
     rows.map(s=>`<div class="data-edit-row orders ${scenarioDataEditorSelectedStops.has(s.id)?'selected':''}" style="${style}" onclick="scenarioDataEditorToggleRow('orders','${s.id}',event)">
