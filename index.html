@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V56 App Workflow Enhancements / V55 Foundation</title>
+<title>RouteER - V57 Scenario Data Editor & Layover Planning / V56 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -1048,10 +1048,80 @@ body{background:var(--bg0);color:var(--text1);}
       </div>
     </div>
     <div class="modal-actions">
+      <button class="btn" style="margin-right:auto;" onclick="openScenarioDataEditor()" title="Edit route templates and customer order planning data before running the scenario">✎ Edit Data</button>
       <button class="btn" onclick="closeModal('scenario-levers-modal')">Cancel</button>
       <button class="btn" onclick="runScenarioLiteReOp()" title="Apply direct scenario changes and recalculate KPIs without rerouting, resequencing, or moving stops between routes">Run Lite ReOp</button>
       <button class="btn primary" onclick="runScenarioModel()">Run Model</button>
       <button class="btn success" onclick="openScenarioAfterActionReport()">After Action Report</button>
+    </div>
+  </div>
+</div>
+
+<!-- V57 Scenario Data Editor Modal -->
+<div id="scenario-data-editor-modal" style="display:none" class="modal-overlay">
+  <div class="modal data-edit-modal">
+    <h2>Scenario Data Editor</h2>
+    <div class="scenario-note" style="margin-bottom:9px;">
+      Edit only the selected Route Templates or Orders. These changes update the current scenario workspace and become the input to the next Lite ReOp or Full Model run. Use the filters to narrow the list, then select one or many rows.
+    </div>
+    <div class="data-edit-tabs">
+      <button id="data-edit-tab-routes" class="btn primary data-edit-tab" onclick="scenarioDataEditorSetTab('routes')">Route Templates</button>
+      <button id="data-edit-tab-orders" class="btn data-edit-tab" onclick="scenarioDataEditorSetTab('orders')">Orders</button>
+      <div id="data-edit-summary" class="data-edit-summary"></div>
+    </div>
+
+    <div id="data-edit-route-controls" class="data-edit-toolbar"></div>
+    <div id="data-edit-order-controls" class="data-edit-toolbar" style="display:none;"></div>
+
+    <div id="data-edit-filters" class="data-edit-filterbar"></div>
+    <div id="data-edit-table" class="data-edit-table-wrap"></div>
+
+    <div class="modal-actions" style="flex:0 0 auto;">
+      <button class="btn" onclick="scenarioDataEditorSelectVisible(true)">Select Visible</button>
+      <button class="btn" onclick="scenarioDataEditorSelectVisible(false)">Clear Selection</button>
+      <button class="btn" onclick="scenarioDataEditorClearFilters()">Clear Filters</button>
+      <span style="flex:1"></span>
+      <button class="btn" onclick="closeModal('scenario-data-editor-modal')">Close</button>
+      <button class="btn primary" onclick="scenarioDataEditorApply()">Apply Changes to Selected</button>
+    </div>
+  </div>
+</div>
+
+<!-- V57 Route Layover Planner -->
+<div id="scenario-route-layover-modal" style="display:none" class="modal-overlay">
+  <div class="modal data-edit-layover">
+    <h2>Convert / Adjust Layover Route(s)</h2>
+    <div class="scenario-note" style="margin-bottom:10px;">The rules below are applied to the currently selected Route Template rows. The optimizer will treat those routes as multi-day layover resources. Active driving/service is limited by Daily Run Time × Days, and the scheduled rest period is protected between operating days.</div>
+    <div class="data-edit-layover-grid">
+      <div class="field"><label>Start Date</label><input id="de-lr-start-date" type="date"/></div>
+      <div class="field"><label>Start Time</label><input id="de-lr-start-time" type="time"/></div>
+      <div class="field"><label>End Date</label><input id="de-lr-end-date" type="date"/></div>
+      <div class="field"><label>End Time</label><input id="de-lr-end-time" type="time"/></div>
+      <div class="field"><label>Daily Run Time (hours)</label><input id="de-lr-daily-hours" type="number" min="0.25" step="0.25" value="10"/></div>
+      <div class="field"><label>How long is the rest stop? (hours)</label><input id="de-lr-rest-hours" type="number" min="0" step="0.25" value="10"/></div>
+      <div class="field"><label>How many days will it run?</label><input id="de-lr-days" type="number" min="2" step="1" value="2"/></div>
+      <div class="field"><label>Layover Status</label><select id="de-lr-enabled"><option value="yes">Tag / Keep as Layover</option><option value="no">Remove Layover Tag</option></select></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('scenario-route-layover-modal')">Cancel</button>
+      <button class="btn success" onclick="scenarioSaveRouteLayoverPlan()">Save Change</button>
+    </div>
+  </div>
+</div>
+
+<!-- V57 Order Layover Planner -->
+<div id="scenario-order-layover-modal" style="display:none" class="modal-overlay">
+  <div class="modal data-edit-layover">
+    <h2>Convert / Adjust Layover Stop(s)</h2>
+    <div class="scenario-note" style="margin-bottom:10px;">These settings apply to the currently selected Order rows. Imported time windows are optional; leave them blank to keep the current values. Tagged orders are eligible only for routes identified as Layover routes during Full Model optimization.</div>
+    <div class="data-edit-layover-grid">
+      <div class="field"><label>Earliest Time Window Imported (Date & Time)</label><input id="de-lo-early" type="datetime-local"/></div>
+      <div class="field"><label>Latest Time Window Imported (Date & Time)</label><input id="de-lo-late" type="datetime-local"/></div>
+      <div class="field" style="grid-column:1/-1;"><label class="data-edit-mini-toggle"><input id="de-lo-tag" type="checkbox" checked/> <strong>Tag as Layover</strong> — optimizer may place these orders on Layover routes only.</label></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('scenario-order-layover-modal')">Cancel</button>
+      <button class="btn success" onclick="scenarioSaveOrderLayoverPlan()">Save Change</button>
     </div>
   </div>
 </div>
@@ -1081,6 +1151,497 @@ body{background:var(--bg0);color:var(--text1);}
 </div>
 
 <script>
+
+// ============================================================
+// V57 — SCENARIO DATA EDITOR + CUSTOM LAYOVER PLANNING
+// ============================================================
+let scenarioDataEditorTab='routes';
+let scenarioDataEditorSelectedRoutes=new Set();
+let scenarioDataEditorSelectedStops=new Set();
+let scenarioDataEditorFilters={routes:{},orders:{}};
+
+function deEsc(v){return escapeHtml(v??'');}
+function deVal(id){return document.getElementById(id)?.value??'';}
+function deChecked(id){return document.getElementById(id)?.checked===true;}
+function deNum(id){const n=parseFloat(deVal(id));return Number.isFinite(n)?n:null;}
+function deDateOnly(v){
+  const s=(v??'').toString().trim();
+  const m=s.match(/(\d{4}-\d{2}-\d{2})/);
+  return m?m[1]:'';
+}
+function deTimeOnly(v){
+  const t=cleanTimeValue(v);
+  return t||'';
+}
+function deCombineDateTime(date,time){
+  const d=(date||'').trim(),t=(time||'').trim();
+  return d&&t?`${d}T${t}:00`:d?`${d}T00:00:00`:'';
+}
+function deShiftDateTime(baseRaw,date,time){
+  const base=(baseRaw||'').toString();
+  const d=date||deDateOnly(base);
+  const t=time||deTimeOnly(base);
+  return deCombineDateTime(d,t);
+}
+function deRouteStartRaw(r){return r?.routeData?.routeStart||r?.routeSummaryStart||deCombineDateTime(r?.date||'',r?.earliestStartTime||'');}
+function deRouteEndRaw(r){return r?.routeData?.routeEnd||r?.routeSummaryEnd||deCombineDateTime(r?.date||'',r?.latestEndTime||'');}
+function deSetRouteStartEnd(r,startRaw,endRaw){
+  if(startRaw){
+    r.routeSummaryStart=startRaw;
+    r.date=deDateOnly(startRaw)||r.date;
+    r.earliestStartTime=deTimeOnly(startRaw)||r.earliestStartTime;
+    r.latestStartTime=r.earliestStartTime;
+    if(r.routeData)r.routeData.routeStart=startRaw;
+  }
+  if(endRaw){
+    r.routeSummaryEnd=endRaw;
+    r.latestEndTime=deTimeOnly(endRaw)||r.latestEndTime;
+    if(r.routeData)r.routeData.routeEnd=endRaw;
+  }
+}
+function deRunHours(r){
+  if(Number.isFinite(+r?.scenarioManualRunHours))return +r.scenarioManualRunHours;
+  const s=scenarioEpochMinutes(deRouteStartRaw(r)),e=scenarioEpochMinutes(deRouteEndRaw(r));
+  return Number.isFinite(s)&&Number.isFinite(e)&&e>s?(e-s)/60:'';
+}
+function deUnique(vals){
+  return [...new Set((vals||[]).map(v=>(v??'').toString().trim()).filter(Boolean))]
+    .sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
+}
+function deFilterValues(section,key){
+  const set=scenarioDataEditorFilters?.[section]?.[key];
+  return set instanceof Set?set:new Set();
+}
+function deFilterMatch(section,key,value){
+  const selected=deFilterValues(section,key);
+  return !selected.size||selected.has((value??'').toString());
+}
+function deFilterSummary(section,key,label){
+  const n=deFilterValues(section,key).size;
+  return n?`${label} (${n})`:label;
+}
+function deToggleFilter(section,key,value,checked){
+  scenarioDataEditorFilters[section]=scenarioDataEditorFilters[section]||{};
+  const set=scenarioDataEditorFilters[section][key] instanceof Set?scenarioDataEditorFilters[section][key]:new Set();
+  checked?set.add(value):set.delete(value);
+  scenarioDataEditorFilters[section][key]=set;
+  scenarioDataEditorRender();
+}
+function deFilterDropdown(section,key,label,values){
+  const selected=deFilterValues(section,key);
+  const opts=deUnique(values);
+  return `<div class="data-edit-filter"><details><summary>${deEsc(deFilterSummary(section,key,label))} ▾</summary><div class="data-edit-filter-menu">
+    ${opts.length?opts.map(v=>`<label class="data-edit-filter-option"><input type="checkbox" ${selected.has(v)?'checked':''} onchange="deToggleFilter('${section}','${key}',${JSON.stringify(v)},this.checked)"/><span>${deEsc(v)}</span></label>`).join(''):'<div style="font-size:10px;color:var(--text3);padding:4px;">No values</div>'}
+  </div></details></div>`;
+}
+function deRouteRows(){
+  return routes.filter(r=>
+    deFilterMatch('routes','number',r.udfNumber1||'')&&
+    deFilterMatch('routes','name',r.name||r.resourceName||r.routeTemplateKey||'')&&
+    deFilterMatch('routes','start',deTimeOnly(deRouteStartRaw(r)))&&
+    deFilterMatch('routes','end',deTimeOnly(deRouteEndRaw(r)))&&
+    deFilterMatch('routes','initial',r.initialLocationKey||'')&&
+    deFilterMatch('routes','final',r.finalLocationKey||'')
+  );
+}
+function deOrderRows(){
+  return stops.filter(s=>!scenarioIsFixedRouteAnchor(s)).filter(s=>
+    deFilterMatch('orders','customer',s.customerName||'')&&
+    deFilterMatch('orders','customerNumber',s.customerNumber||s.shipToId||s.locationKey||'')&&
+    deFilterMatch('orders','preferredResource',s.preferredResourceKey||'')&&
+    deFilterMatch('orders','preferredSequence',String(s.preferredRouteSequence||''))&&
+    deFilterMatch('orders','earlyTime',deTimeOnly(s.earliestTimeWindowRaw||s.earliestTimeWindow))&&
+    deFilterMatch('orders','lateTime',deTimeOnly(s.latestTimeWindowRaw||s.latestTimeWindow))&&
+    deFilterMatch('orders','earlyImported',rawImportedDateTime(s.earliestTimeWindowRaw||''))
+  );
+}
+function deApplyFieldCard(applyId,label,inputHtml){
+  return `<div class="data-edit-card"><label class="data-edit-apply"><input id="${applyId}" type="checkbox"/> Apply</label><div class="data-edit-card-title">${deEsc(label)}</div>${inputHtml}</div>`;
+}
+function scenarioDataEditorRouteControls(){
+  const depots=deUnique(depotLocations.map(d=>d.locationKey));
+  const trucksList=deUnique([...trucks.map(t=>t.truckKey),...routes.map(r=>r.truckKey)]);
+  return [
+    deApplyFieldCard('de-r-ap-start-date','Start Date','<div class="field"><input id="de-r-start-date" type="date"/></div>'),
+    deApplyFieldCard('de-r-ap-start-time','Start Time','<div class="field"><input id="de-r-start-time" type="time"/></div>'),
+    deApplyFieldCard('de-r-ap-end-date','End Date','<div class="field"><input id="de-r-end-date" type="date"/></div>'),
+    deApplyFieldCard('de-r-ap-end-time','End Time','<div class="field"><input id="de-r-end-time" type="time"/></div>'),
+    deApplyFieldCard('de-r-ap-runtime','Run Time','<div class="field"><input id="de-r-runtime" type="number" min="0" step="0.25" placeholder="Hours"/></div>'),
+    deApplyFieldCard('de-r-ap-truck','Truck Key',`<div class="field"><input id="de-r-truck" list="de-truck-options" placeholder="Truck Key"/><datalist id="de-truck-options">${trucksList.map(v=>`<option value="${deEsc(v)}"></option>`).join('')}</datalist></div>`),
+    deApplyFieldCard('de-r-ap-initial','Initial Location',`<div class="field"><input id="de-r-initial" list="de-depot-options" placeholder="LocationKey"/><datalist id="de-depot-options">${depots.map(v=>`<option value="${deEsc(v)}"></option>`).join('')}</datalist></div>`),
+    deApplyFieldCard('de-r-ap-final','Final Location',`<div class="field"><input id="de-r-final" list="de-depot-options" placeholder="LocationKey"/></div>`),
+    `<div class="data-edit-card"><div class="data-edit-card-title">Convert / Adjust Layover</div><button class="btn" style="width:100%;justify-content:center;" onclick="scenarioOpenRouteLayoverPlan()">Configure Layover…</button><div class="data-edit-note">Applies to selected routes only.</div></div>`
+  ].join('');
+}
+function scenarioDataEditorOrderControls(){
+  const depots=deUnique(depotLocations.map(d=>d.locationKey));
+  return [
+    `<div class="data-edit-card"><div class="data-edit-card-title">Remove Preferred Resource</div><label class="data-edit-mini-toggle"><input id="de-o-remove-resource" type="checkbox"/> Remove from selected</label></div>`,
+    `<div class="data-edit-card"><div class="data-edit-card-title">Remove Preferred Sequence</div><label class="data-edit-mini-toggle"><input id="de-o-remove-sequence" type="checkbox"/> Remove from selected</label></div>`,
+    deApplyFieldCard('de-o-ap-early-time','Earliest Time Window Time','<div class="field"><input id="de-o-early-time" type="time"/></div>'),
+    deApplyFieldCard('de-o-ap-late-time','Latest Time Window Time','<div class="field"><input id="de-o-late-time" type="time"/></div>'),
+    deApplyFieldCard('de-o-ap-early-date','Earliest Time Window Date','<div class="field"><input id="de-o-early-date" type="date"/></div>'),
+    deApplyFieldCard('de-o-ap-initial','Initial Location',`<div class="field"><input id="de-o-initial" list="de-order-depot-options" placeholder="LocationKey"/><datalist id="de-order-depot-options">${depots.map(v=>`<option value="${deEsc(v)}"></option>`).join('')}</datalist></div>`),
+    deApplyFieldCard('de-o-ap-final','Final Location',`<div class="field"><input id="de-o-final" list="de-order-depot-options" placeholder="LocationKey"/></div>`),
+    `<div class="data-edit-card"><div class="data-edit-card-title">Convert / Adjust Layover</div><button class="btn" style="width:100%;justify-content:center;" onclick="scenarioOpenOrderLayoverPlan()">Configure Layover Stop(s)…</button><div class="data-edit-note">Tagged orders may optimize onto layover routes only.</div></div>`
+  ].join('');
+}
+function scenarioDataEditorFiltersHtml(){
+  if(scenarioDataEditorTab==='routes'){
+    return [
+      deFilterDropdown('routes','number','Route Numbers',routes.map(r=>r.udfNumber1||'')),
+      deFilterDropdown('routes','name','Route Name',routes.map(r=>r.name||r.resourceName||r.routeTemplateKey||'')),
+      deFilterDropdown('routes','start','Start Times',routes.map(r=>deTimeOnly(deRouteStartRaw(r)))),
+      deFilterDropdown('routes','end','End Times',routes.map(r=>deTimeOnly(deRouteEndRaw(r)))),
+      deFilterDropdown('routes','initial','Initial Locations',routes.map(r=>r.initialLocationKey||'')),
+      deFilterDropdown('routes','final','Final Locations',routes.map(r=>r.finalLocationKey||''))
+    ].join('');
+  }
+  const rows=stops.filter(s=>!scenarioIsFixedRouteAnchor(s));
+  return [
+    deFilterDropdown('orders','customer','Customer Name',rows.map(s=>s.customerName||'')),
+    deFilterDropdown('orders','customerNumber','Customer Number',rows.map(s=>s.customerNumber||s.shipToId||s.locationKey||'')),
+    deFilterDropdown('orders','preferredResource','Preferred Resource',rows.map(s=>s.preferredResourceKey||'')),
+    deFilterDropdown('orders','preferredSequence','Preferred Sequence',rows.map(s=>String(s.preferredRouteSequence||''))),
+    deFilterDropdown('orders','earlyTime','Earliest Time',rows.map(s=>deTimeOnly(s.earliestTimeWindowRaw||s.earliestTimeWindow))),
+    deFilterDropdown('orders','lateTime','Latest Time',rows.map(s=>deTimeOnly(s.latestTimeWindowRaw||s.latestTimeWindow))),
+    deFilterDropdown('orders','earlyImported','Earliest Imported',rows.map(s=>rawImportedDateTime(s.earliestTimeWindowRaw||'')))
+  ].join('');
+}
+function scenarioDataEditorTableHtml(){
+  if(scenarioDataEditorTab==='routes'){
+    const rows=deRouteRows();
+    return `<div class="data-edit-row routes header"><div></div><div>Route #</div><div>Route Name</div><div>Start</div><div>End</div><div>Initial</div><div>Final</div><div>Truck Key</div><div>Layover</div></div>`+
+      rows.map(r=>`<div class="data-edit-row routes ${scenarioDataEditorSelectedRoutes.has(r.id)?'selected':''}" onclick="scenarioDataEditorToggleRow('routes','${r.id}',event)">
+        <div><input type="checkbox" ${scenarioDataEditorSelectedRoutes.has(r.id)?'checked':''} onclick="event.stopPropagation();scenarioDataEditorToggleRow('routes','${r.id}',event,this.checked)"/></div>
+        <div>${deEsc(r.udfNumber1||'—')}</div><div><strong>${deEsc(r.name||r.resourceName||r.routeTemplateKey||'Route')}</strong></div>
+        <div>${deEsc(rawImportedDateTime(deRouteStartRaw(r))||'—')}</div><div>${deEsc(rawImportedDateTime(deRouteEndRaw(r))||'—')}</div>
+        <div>${deEsc(r.initialLocationKey||'—')}</div><div>${deEsc(r.finalLocationKey||'—')}</div><div>${deEsc(r.truckKey||'—')}</div>
+        <div>${r.scenarioCustomLayover?`Yes · ${deEsc(r.scenarioLayoverPlan?.days||'')} day(s)`:(scenarioRouteIsLayover(r)?'Imported Layover':'No')}</div>
+      </div>`).join('');
+  }
+  const rows=deOrderRows();
+  return `<div class="data-edit-row orders header"><div></div><div>Customer</div><div>Customer #</div><div>Order(s)</div><div>Preferred Resource</div><div>Pref Seq</div><div>Earliest Time</div><div>Latest Time</div><div>Earliest Imported</div><div>Layover</div></div>`+
+    rows.map(s=>`<div class="data-edit-row orders ${scenarioDataEditorSelectedStops.has(s.id)?'selected':''}" onclick="scenarioDataEditorToggleRow('orders','${s.id}',event)">
+      <div><input type="checkbox" ${scenarioDataEditorSelectedStops.has(s.id)?'checked':''} onclick="event.stopPropagation();scenarioDataEditorToggleRow('orders','${s.id}',event,this.checked)"/></div>
+      <div><strong>${deEsc(s.customerName||'Stop')}</strong><div style="font-size:8px;color:var(--text3);">${deEsc(s.city||'')} ${deEsc(s.state||'')}</div></div>
+      <div>${deEsc(s.customerNumber||s.shipToId||s.locationKey||'—')}</div><div>${deEsc(orderLabel(s)||'—')}</div>
+      <div>${deEsc(s.preferredResourceKey||'—')}</div><div>${deEsc(s.preferredRouteSequence||'—')}</div>
+      <div>${deEsc(deTimeOnly(s.earliestTimeWindowRaw||s.earliestTimeWindow)||'—')}</div><div>${deEsc(deTimeOnly(s.latestTimeWindowRaw||s.latestTimeWindow)||'—')}</div>
+      <div>${deEsc(rawImportedDateTime(s.earliestTimeWindowRaw||'')||'—')}</div><div>${s.scenarioLayoverOnly?'Layover Only':'No'}</div>
+    </div>`).join('');
+}
+function scenarioDataEditorRender(){
+  const rc=document.getElementById('data-edit-route-controls'),oc=document.getElementById('data-edit-order-controls');
+  if(!rc||!oc)return;
+  rc.style.display=scenarioDataEditorTab==='routes'?'grid':'none';
+  oc.style.display=scenarioDataEditorTab==='orders'?'grid':'none';
+  document.getElementById('data-edit-tab-routes').className='btn data-edit-tab'+(scenarioDataEditorTab==='routes'?' primary':'');
+  document.getElementById('data-edit-tab-orders').className='btn data-edit-tab'+(scenarioDataEditorTab==='orders'?' primary':'');
+  if(!rc.dataset.ready){rc.innerHTML=scenarioDataEditorRouteControls();rc.dataset.ready='1';}
+  if(!oc.dataset.ready){oc.innerHTML=scenarioDataEditorOrderControls();oc.dataset.ready='1';}
+  document.getElementById('data-edit-filters').innerHTML=scenarioDataEditorFiltersHtml();
+  document.getElementById('data-edit-table').innerHTML=scenarioDataEditorTableHtml();
+  const visible=scenarioDataEditorTab==='routes'?deRouteRows().length:deOrderRows().length;
+  const selected=scenarioDataEditorTab==='routes'?scenarioDataEditorSelectedRoutes.size:scenarioDataEditorSelectedStops.size;
+  document.getElementById('data-edit-summary').textContent=`${visible} visible · ${selected} selected`;
+}
+function openScenarioDataEditor(){
+  scenarioDataEditorSelectedRoutes.clear();scenarioDataEditorSelectedStops.clear();
+  scenarioDataEditorFilters={routes:{},orders:{}};
+  document.getElementById('scenario-data-editor-modal').style.display='flex';
+  scenarioDataEditorRender();
+}
+function scenarioDataEditorSetTab(tab){scenarioDataEditorTab=tab==='orders'?'orders':'routes';scenarioDataEditorRender();}
+function scenarioDataEditorToggleRow(section,id,event,force){
+  const set=section==='routes'?scenarioDataEditorSelectedRoutes:scenarioDataEditorSelectedStops;
+  const checked=typeof force==='boolean'?force:!set.has(id);
+  checked?set.add(id):set.delete(id);
+  scenarioDataEditorRender();
+}
+function scenarioDataEditorSelectVisible(select){
+  const rows=scenarioDataEditorTab==='routes'?deRouteRows():deOrderRows();
+  const set=scenarioDataEditorTab==='routes'?scenarioDataEditorSelectedRoutes:scenarioDataEditorSelectedStops;
+  rows.forEach(x=>select?set.add(x.id):set.delete(x.id));
+  scenarioDataEditorRender();
+}
+function scenarioDataEditorClearFilters(){scenarioDataEditorFilters[scenarioDataEditorTab]={};scenarioDataEditorRender();}
+function deSetStopTime(stop,which,time){
+  const rawKey=which==='early'?'earliestTimeWindowRaw':'latestTimeWindowRaw';
+  const timeKey=which==='early'?'earliestTimeWindow':'latestTimeWindow';
+  const orderRawKey=which==='early'?'earliestRaw':'latestRaw';
+  const current=stop[rawKey]||'';
+  stop[timeKey]=time;
+  stop[rawKey]=deShiftDateTime(current,'',time);
+  (stop.orders||[]).forEach(o=>{o[orderRawKey]=deShiftDateTime(o[orderRawKey]||current,'',time);});
+}
+function deSetStopEarlyDate(stop,date){
+  const current=stop.earliestTimeWindowRaw||'';
+  stop.earliestTimeWindowRaw=deShiftDateTime(current,date,deTimeOnly(current||stop.earliestTimeWindow));
+  (stop.orders||[]).forEach(o=>{o.earliestRaw=deShiftDateTime(o.earliestRaw||current,date,deTimeOnly(o.earliestRaw||current||stop.earliestTimeWindow));});
+}
+function scenarioDataEditorApply(){
+  if(scenarioDataEditorTab==='routes'){
+    const selected=routes.filter(r=>scenarioDataEditorSelectedRoutes.has(r.id));
+    if(!selected.length){showToast('Select one or more Route Templates first');return;}
+    selected.forEach(r=>{
+      const oldTruck=r.truckKey||'';
+      let start=deRouteStartRaw(r),end=deRouteEndRaw(r);
+      if(deChecked('de-r-ap-start-date'))start=deShiftDateTime(start,deVal('de-r-start-date'),deTimeOnly(start));
+      if(deChecked('de-r-ap-start-time'))start=deShiftDateTime(start,deDateOnly(start)||r.date,deVal('de-r-start-time'));
+      if(deChecked('de-r-ap-end-date'))end=deShiftDateTime(end,deVal('de-r-end-date'),deTimeOnly(end));
+      if(deChecked('de-r-ap-end-time'))end=deShiftDateTime(end,deDateOnly(end)||deDateOnly(start)||r.date,deVal('de-r-end-time'));
+      if(deChecked('de-r-ap-runtime')){
+        const hrs=deNum('de-r-runtime');
+        if(hrs!==null&&hrs>=0){
+          r.scenarioManualRunHours=hrs;r.work1Duration=hrs;
+          const sm=scenarioEpochMinutes(start);
+          if(Number.isFinite(sm)&&!deChecked('de-r-ap-end-date')&&!deChecked('de-r-ap-end-time')){
+            end=new Date((sm+hrs*60)*60000).toISOString().slice(0,19);
+          }
+        }
+      }
+      deSetRouteStartEnd(r,start,end);
+      if(deChecked('de-r-ap-truck')){r.truckKey=deVal('de-r-truck');if(typeof v55SyncRouteTruckCapacity==='function')v55SyncRouteTruckCapacity(r,oldTruck);}
+      if(deChecked('de-r-ap-initial'))r.initialLocationKey=deVal('de-r-initial');
+      if(deChecked('de-r-ap-final'))r.finalLocationKey=deVal('de-r-final');
+    });
+    enrichRouteDepots();reseq();render();
+    showToast(`Updated ${selected.length} Route Template${selected.length===1?'':'s'}`);
+  }else{
+    const selected=stops.filter(s=>scenarioDataEditorSelectedStops.has(s.id));
+    if(!selected.length){showToast('Select one or more Orders first');return;}
+    selected.forEach(s=>{
+      if(deChecked('de-o-remove-resource')){s.preferredResourceKey='';(s.orders||[]).forEach(o=>o.preferredResourceKey='');}
+      if(deChecked('de-o-remove-sequence')){s.preferredRouteSequence='';(s.orders||[]).forEach(o=>o.preferredRouteSequence='');}
+      if(deChecked('de-o-ap-early-time'))deSetStopTime(s,'early',deVal('de-o-early-time'));
+      if(deChecked('de-o-ap-late-time'))deSetStopTime(s,'late',deVal('de-o-late-time'));
+      if(deChecked('de-o-ap-early-date'))deSetStopEarlyDate(s,deVal('de-o-early-date'));
+      if(deChecked('de-o-ap-initial')){
+        s.scenarioOriginalDepotKey=deVal('de-o-initial');
+        s.initialLocationKey=deVal('de-o-initial');
+        (s.orders||[]).forEach(o=>o.initialLocationKey=deVal('de-o-initial'));
+      }
+      if(deChecked('de-o-ap-final')){
+        s.finalLocationKey=deVal('de-o-final');
+        (s.orders||[]).forEach(o=>o.finalLocationKey=deVal('de-o-final'));
+      }
+    });
+    render();
+    showToast(`Updated ${selected.length} Order stop${selected.length===1?'':'s'}`);
+  }
+  scenarioDataEditorRender();
+  if(scenarioBaseline){
+    // Edits are intentional scenario-source changes. Update the current baseline
+    // so a subsequent Run Model does not restore the pre-edit values.
+    scenarioBaseline=captureScenarioBaseline();
+    scenarioLastRun=null;
+  }
+}
+function scenarioOpenRouteLayoverPlan(){
+  if(!scenarioDataEditorSelectedRoutes.size){showToast('Select one or more Route Templates first');return;}
+  const first=routes.find(r=>scenarioDataEditorSelectedRoutes.has(r.id));
+  const p=first?.scenarioLayoverPlan||{};
+  document.getElementById('de-lr-start-date').value=p.startDate||deDateOnly(deRouteStartRaw(first));
+  document.getElementById('de-lr-start-time').value=p.startTime||deTimeOnly(deRouteStartRaw(first));
+  document.getElementById('de-lr-end-date').value=p.endDate||deDateOnly(deRouteEndRaw(first));
+  document.getElementById('de-lr-end-time').value=p.endTime||deTimeOnly(deRouteEndRaw(first));
+  document.getElementById('de-lr-daily-hours').value=p.dailyRunHours||10;
+  document.getElementById('de-lr-rest-hours').value=p.restHours||10;
+  document.getElementById('de-lr-days').value=p.days||2;
+  document.getElementById('de-lr-enabled').value=first?.scenarioCustomLayover===false?'no':'yes';
+  document.getElementById('scenario-route-layover-modal').style.display='flex';
+}
+function scenarioSaveRouteLayoverPlan(){
+  const selected=routes.filter(r=>scenarioDataEditorSelectedRoutes.has(r.id));
+  if(!selected.length)return;
+  const enabled=deVal('de-lr-enabled')==='yes';
+  const plan={
+    startDate:deVal('de-lr-start-date'),startTime:deVal('de-lr-start-time'),
+    endDate:deVal('de-lr-end-date'),endTime:deVal('de-lr-end-time'),
+    dailyRunHours:Math.max(.25,deNum('de-lr-daily-hours')||10),
+    restHours:Math.max(0,deNum('de-lr-rest-hours')||0),
+    days:Math.max(2,Math.round(deNum('de-lr-days')||2))
+  };
+  selected.forEach(r=>{
+    r.scenarioCustomLayover=enabled;
+    r.scenarioLayoverPlan=enabled?{...plan}:null;
+    if(enabled){
+      const start=deCombineDateTime(plan.startDate,plan.startTime);
+      const end=deCombineDateTime(plan.endDate,plan.endTime);
+      if(start||end)deSetRouteStartEnd(r,start||deRouteStartRaw(r),end||deRouteEndRaw(r));
+    }
+  });
+  closeModal('scenario-route-layover-modal');scenarioDataEditorRender();
+  if(scenarioBaseline){scenarioBaseline=captureScenarioBaseline();scenarioLastRun=null;}
+  showToast(`${selected.length} route(s) ${enabled?'configured as layover':'removed from custom layover'}`);
+}
+function scenarioOpenOrderLayoverPlan(){
+  if(!scenarioDataEditorSelectedStops.size){showToast('Select one or more Orders first');return;}
+  const first=stops.find(s=>scenarioDataEditorSelectedStops.has(s.id));
+  const toLocal=v=>{
+    const raw=rawImportedDateTime(v);if(!raw)return '';
+    return raw.replace(' ','T').slice(0,16);
+  };
+  document.getElementById('de-lo-early').value=toLocal(first?.earliestTimeWindowRaw||'');
+  document.getElementById('de-lo-late').value=toLocal(first?.latestTimeWindowRaw||'');
+  document.getElementById('de-lo-tag').checked=first?.scenarioLayoverOnly!==false;
+  document.getElementById('scenario-order-layover-modal').style.display='flex';
+}
+function scenarioSaveOrderLayoverPlan(){
+  const selected=stops.filter(s=>scenarioDataEditorSelectedStops.has(s.id));
+  if(!selected.length)return;
+  const early=deVal('de-lo-early'),late=deVal('de-lo-late'),tag=deChecked('de-lo-tag');
+  selected.forEach(s=>{
+    s.scenarioLayoverOnly=tag;
+    (s.orders||[]).forEach(o=>o.scenarioLayoverOnly=tag);
+    if(early){
+      s.earliestTimeWindowRaw=early;s.earliestTimeWindow=deTimeOnly(early);
+      (s.orders||[]).forEach(o=>o.earliestRaw=early);
+    }
+    if(late){
+      s.latestTimeWindowRaw=late;s.latestTimeWindow=deTimeOnly(late);
+      (s.orders||[]).forEach(o=>o.latestRaw=late);
+    }
+  });
+  closeModal('scenario-order-layover-modal');scenarioDataEditorRender();
+  if(scenarioBaseline){scenarioBaseline=captureScenarioBaseline();scenarioLastRun=null;}
+  showToast(`${selected.length} order stop(s) ${tag?'tagged Layover Only':'removed from Layover Only'}`);
+}
+
+// ----- Optimizer integration for custom layovers -----
+const v57BaseScenarioRouteIsLayover=scenarioRouteIsLayover;
+scenarioRouteIsLayover=function(route){
+  if(route?.scenarioCustomLayover===true)return true;
+  if(route?.scenarioCustomLayover===false)return false;
+  return v57BaseScenarioRouteIsLayover(route);
+};
+const v57BaseScenarioLayoverRuntimeOk=scenarioLayoverRuntimeOk;
+scenarioLayoverRuntimeOk=function(sim){
+  if(!sim)return false;
+  const routeId=sim.routeId||null;
+  const route=routeId?routes.find(r=>r.id===routeId):null;
+  const p=route?.scenarioLayoverPlan;
+  if(route?.scenarioCustomLayover&&p){
+    const daily=Math.max(.25,+p.dailyRunHours||10);
+    const days=Math.max(1,Math.round(+p.days||2));
+    const segs=Array.isArray(sim.segmentHours)?sim.segmentHours:[];
+    return segs.length<=days && segs.every(h=>(+h||0)<=daily+1e-6) &&
+      (+sim.hours||0)<=daily*days+1e-6;
+  }
+  return v57BaseScenarioLayoverRuntimeOk(sim);
+};
+// Custom layover evaluator: inserts the configured full-length off-duty rest
+// whenever another leg/service would exceed the allowed Daily Run Time. Long
+// customer-window gaps that are at least the configured rest length also count
+// as the required off-duty rest rather than route work.
+function scenarioV57EvaluateCustomLayover(route,rs,startEpoch){
+  const p=route?.scenarioLayoverPlan||{};
+  const dailyCap=Math.max(.25,+p.dailyRunHours||10)*60;
+  const restMins=Math.max(0,+p.restHours||0)*60;
+  const maxDays=Math.max(1,Math.round(+p.days||2));
+  const configuredStart=scenarioEpochMinutes(deCombineDateTime(p.startDate,p.startTime));
+  const configuredEnd=scenarioEpochMinutes(deCombineDateTime(p.endDate,p.endTime));
+  let cursor=Number.isFinite(configuredStart)?configuredStart:startEpoch;
+  let prev=routeInitialDepot(route),miles=0,wait=0,onTime=0,windowStops=0,late=0,details=[];
+  let activeToday=0,totalActive=0,dayIndex=0,segmentHours=[],maxStopWaitMinutes=0;
+
+  function takeRest(){
+    segmentHours.push(activeToday/60);
+    activeToday=0;
+    dayIndex++;
+    if(restMins>0)cursor+=restMins;
+  }
+  function ensureActive(minutes){
+    const need=Math.max(0,+minutes||0);
+    if(activeToday>0 && activeToday+need>dailyCap+1e-6 && dayIndex<maxDays-1)takeRest();
+    return dayIndex<maxDays && activeToday+need<=dailyCap+1e-6;
+  }
+
+  for(let idx=0;idx<(rs||[]).length;idx++){
+    const s=rs[idx];
+    if(scenarioIsLayoverStop(s)){
+      if(activeToday>0&&dayIndex<maxDays-1)takeRest();
+      details.push({stopId:s.id,arrive:cursor,serviceStart:cursor,ok:true,wait:0,layover:true,segmentIndex:dayIndex});
+      prev=s;continue;
+    }
+
+    let legMiles=0,legMins=0;
+    if(prev&&prev.lat&&prev.lng&&s.lat&&s.lng){
+      legMiles=scenarioModelLegMiles(prev,s);legMins=scenarioModelDriveMinutes(legMiles);
+      if(!ensureActive(legMins)){
+        // Still record the overflow so runtime validation rejects the candidate.
+        activeToday+=legMins;totalActive+=legMins;cursor+=legMins;miles+=legMiles;
+      }else{
+        cursor+=legMins;activeToday+=legMins;totalActive+=legMins;miles+=legMiles;
+      }
+    }
+
+    const w=scenarioStopWindow(s),rawArrival=cursor;
+    let serviceStart=cursor,stopWait=0;
+    if(Number.isFinite(w.early)&&serviceStart<w.early){
+      stopWait=w.early-serviceStart;
+      // A sufficiently long gap becomes the planned off-duty rest.
+      if(restMins>0&&stopWait>=restMins&&dayIndex<maxDays-1){
+        segmentHours.push(activeToday/60);activeToday=0;dayIndex++;
+        cursor=w.early;serviceStart=cursor;
+      }else{
+        wait+=stopWait;maxStopWaitMinutes=Math.max(maxStopWaitMinutes,stopWait);
+        if(!ensureActive(stopWait)){activeToday+=stopWait;totalActive+=stopWait;cursor+=stopWait;}
+        else{activeToday+=stopWait;totalActive+=stopWait;cursor=w.early;}
+        serviceStart=cursor;
+      }
+    }
+
+    let ok=true;
+    if(Number.isFinite(w.late)){windowStops++;if(serviceStart<=w.late+1e-6)onTime++;else{ok=false;late++;}}
+    const svc=stopServiceMinutes(s);
+    if(!ensureActive(svc)){activeToday+=svc;totalActive+=svc;cursor=serviceStart+svc;}
+    else{activeToday+=svc;totalActive+=svc;cursor=serviceStart+svc;}
+    details.push({stopId:s.id,arrive:rawArrival,serviceStart,ok,wait:stopWait,segmentIndex:dayIndex});
+    prev=s;
+  }
+
+  const fin=routeFinalDepot(route);
+  if(prev&&fin&&prev.lat&&prev.lng&&fin.lat&&fin.lng){
+    const leg=scenarioModelLegMiles(prev,fin),mins=scenarioModelDriveMinutes(leg);
+    if(!ensureActive(mins)){activeToday+=mins;totalActive+=mins;cursor+=mins;}
+    else{activeToday+=mins;totalActive+=mins;cursor+=mins;}
+    miles+=leg;
+  }
+  segmentHours.push(activeToday/60);
+
+  // If the user provided a hard layover end date/time, finishing beyond it makes
+  // the final segment visibly infeasible to the normal runtime check.
+  if(Number.isFinite(configuredEnd)&&cursor>configuredEnd+1e-6){
+    segmentHours[segmentHours.length-1]+=(cursor-configuredEnd)/60;
+  }
+
+  return {
+    routeId:route.id,miles,hours:totalActive/60,waitMinutes:wait,maxStopWaitMinutes,
+    onTime,windowStops,late,startEpoch:Number.isFinite(configuredStart)?configuredStart:startEpoch,
+    endEpoch:cursor,stops:details,isLayover:true,isBackhaulOnly:scenarioRouteIsBackhaulOnly(route),
+    segmentHours,customLayoverPlan:{...p},layoverRestHours:restMins/60*Math.max(0,segmentHours.length-1)
+  };
+}
+
+// Ensure simulations expose routeId so custom layover validation can resolve its plan.
+const v57BaseScenarioEvaluateOrderedRoute=scenarioEvaluateOrderedRoute;
+scenarioEvaluateOrderedRoute=function(route,rs,startEpoch){
+  if(route?.scenarioCustomLayover&&route?.scenarioLayoverPlan){
+    return scenarioV57EvaluateCustomLayover(route,rs,startEpoch);
+  }
+  const sim=v57BaseScenarioEvaluateOrderedRoute(route,rs,startEpoch);
+  if(sim)sim.routeId=route?.id||null;
+  return sim;
+};
+const v57BaseScenarioCanTargetRoute=scenarioCanTargetRoute;
+scenarioCanTargetRoute=function(stop,route,opts){
+  if(!v57BaseScenarioCanTargetRoute(stop,route,opts))return false;
+  if(stop?.scenarioLayoverOnly===true && !scenarioRouteIsLayover(route))return false;
+  return true;
+};
+
 // V56 — requested app workflow enhancements; optimizer logic unchanged.
 // ============================================================
 // STATE
