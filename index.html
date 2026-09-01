@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V57 Scenario Data Editor & Layover Planning / V56 Foundation</title>
+<title>RouteER - V58 Manifest-Style Data Editor / V57 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -460,6 +460,184 @@ body{background:var(--bg0);color:var(--text1);}
 .manifest-selection-bar select{background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text1);font-size:10px;font-family:'Sora',sans-serif;padding:4px 6px;min-width:180px;}
 @media (max-width:900px){.left-panel.expanded-workspace{width:min(86vw,760px);}}
 </style>
+
+<style>
+/* V58 — Scenario Data Editor styled to match the Route Manifest */
+#scenario-data-editor-modal .data-edit-modal{
+  width:calc(100vw - 12px)!important;
+  max-width:calc(100vw - 12px)!important;
+  height:92vh!important;
+  max-height:92vh!important;
+  margin:0!important;
+  padding:10px 18px 12px!important;
+  overflow:hidden!important;
+  display:flex!important;
+  flex-direction:column!important;
+  border-radius:8px!important;
+}
+#scenario-data-editor-modal .data-edit-head{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex:0 0 auto;}
+#scenario-data-editor-modal .data-edit-head h2{margin:0;white-space:nowrap;}
+#scenario-data-editor-modal .data-edit-head-note{font-size:9px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#scenario-data-editor-modal .data-edit-tabs{display:flex;gap:7px;align-items:center;margin-bottom:9px;flex:0 0 auto;}
+#scenario-data-editor-modal .data-edit-tab{min-width:170px;justify-content:center;}
+#scenario-data-editor-modal .data-edit-summary{margin-left:auto;color:var(--text3);font-size:10px;font-weight:700;}
+
+#scenario-data-editor-modal .data-edit-toolbar{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:8px!important;
+  margin:0 0 9px!important;
+  flex:0 0 auto!important;
+}
+#scenario-data-editor-modal .data-edit-card{
+  min-width:0!important;
+  min-height:72px!important;
+  padding:8px 10px!important;
+  border:1px solid #4c4c49!important;
+  border-radius:8px!important;
+  background:#343432!important;
+  display:flex!important;
+  flex-direction:column!important;
+  justify-content:center!important;
+  position:relative!important;
+}
+#scenario-data-editor-modal .data-edit-card-title{
+  order:5!important;
+  margin:5px 0 0!important;
+  text-align:center!important;
+  font-size:8px!important;
+  font-weight:700!important;
+  color:#adb3be!important;
+  text-transform:uppercase!important;
+  letter-spacing:.55px!important;
+}
+#scenario-data-editor-modal .data-edit-card .field{margin:0!important;min-width:0!important;}
+#scenario-data-editor-modal .data-edit-card .field input,
+#scenario-data-editor-modal .data-edit-card .field select{
+  width:100%!important;
+  height:32px!important;
+  text-align:center!important;
+  font-size:12px!important;
+  font-weight:800!important;
+  border-radius:6px!important;
+  background:#292929!important;
+}
+#scenario-data-editor-modal .data-edit-apply{
+  position:absolute!important;
+  top:5px!important;
+  right:7px!important;
+  margin:0!important;
+  font-size:8px!important;
+  z-index:2!important;
+}
+#scenario-data-editor-modal .data-edit-card > button.btn{
+  width:100%!important;
+  min-height:32px!important;
+  justify-content:center!important;
+  margin:0!important;
+}
+#scenario-data-editor-modal .data-edit-card > .data-edit-mini-toggle{
+  margin:0!important;
+  justify-content:center!important;
+  font-size:10px!important;
+}
+
+#scenario-data-editor-modal .data-edit-filterbar{
+  display:flex!important;
+  gap:6px!important;
+  align-items:flex-start!important;
+  flex-wrap:wrap!important;
+  padding:5px 0 8px!important;
+  margin:0!important;
+  border:0!important;
+  background:transparent!important;
+  flex:0 0 auto!important;
+}
+#scenario-data-editor-modal .data-edit-filter{position:relative!important;}
+#scenario-data-editor-modal .data-edit-filter details{position:relative!important;}
+#scenario-data-editor-modal .data-edit-filter summary{
+  list-style:none!important;
+  cursor:pointer!important;
+  background:#30302f!important;
+  border:1px solid #4b4b48!important;
+  border-radius:6px!important;
+  padding:6px 9px!important;
+  min-width:140px!important;
+  max-width:210px!important;
+  font-size:9px!important;
+  font-weight:700!important;
+  color:#d4d7dd!important;
+  white-space:nowrap!important;
+  overflow:hidden!important;
+  text-overflow:ellipsis!important;
+}
+#scenario-data-editor-modal .data-edit-filter summary::-webkit-details-marker{display:none!important;}
+#scenario-data-editor-modal .data-edit-filter-menu{
+  position:absolute!important;
+  z-index:80!important;
+  top:33px!important;
+  left:0!important;
+  min-width:230px!important;
+  max-width:350px!important;
+  max-height:250px!important;
+  overflow:auto!important;
+  background:#242424!important;
+  border:1px solid #555550!important;
+  border-radius:7px!important;
+  padding:7px!important;
+  box-shadow:0 14px 30px rgba(0,0,0,.55)!important;
+}
+#scenario-data-editor-modal .data-edit-filter-option{display:flex!important;gap:6px!important;align-items:flex-start!important;padding:4px 2px!important;font-size:10px!important;}
+
+#scenario-data-editor-modal .data-edit-table-wrap{
+  flex:1 1 auto!important;
+  min-height:0!important;
+  overflow:auto!important;
+  border:1px solid #4a4a46!important;
+  border-radius:9px!important;
+  background:#2b2b2a!important;
+  margin:0 0 8px!important;
+}
+#scenario-data-editor-modal .data-edit-row{
+  display:grid!important;
+  gap:8px!important;
+  align-items:center!important;
+  padding:8px 11px!important;
+  border-bottom:1px solid #464642!important;
+  font-size:10px!important;
+  min-width:1370px!important;
+}
+#scenario-data-editor-modal .data-edit-row.routes{grid-template-columns:36px 92px 235px 155px 155px 165px 165px 155px 135px!important;}
+#scenario-data-editor-modal .data-edit-row.orders{grid-template-columns:36px 250px 125px 175px 150px 105px 145px 145px 225px 125px!important;}
+#scenario-data-editor-modal .data-edit-row.header{
+  position:sticky!important;
+  top:0!important;
+  z-index:4!important;
+  background:#393937!important;
+  color:#adb3bd!important;
+  font-size:8px!important;
+  font-weight:800!important;
+  text-transform:uppercase!important;
+  letter-spacing:.55px!important;
+}
+#scenario-data-editor-modal .data-edit-row:not(.header):nth-child(even){background:#2f2f2e!important;}
+#scenario-data-editor-modal .data-edit-row:not(.header):nth-child(odd){background:#292929!important;}
+#scenario-data-editor-modal .data-edit-row.selected{background:#59342e!important;box-shadow:inset 4px 0 0 var(--accent)!important;}
+#scenario-data-editor-modal .data-edit-row:hover:not(.header){background:#383837!important;}
+
+#scenario-data-editor-modal .data-edit-footer{
+  flex:0 0 auto!important;
+  display:flex!important;
+  gap:7px!important;
+  align-items:center!important;
+  padding-top:1px!important;
+}
+@media(max-width:1050px){
+  #scenario-data-editor-modal .data-edit-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+  #scenario-data-editor-modal .data-edit-head-note{display:none!important;}
+}
+</style>
+
 </head>
 <body>
 
@@ -1060,9 +1238,9 @@ body{background:var(--bg0);color:var(--text1);}
 <!-- V57 Scenario Data Editor Modal -->
 <div id="scenario-data-editor-modal" style="display:none" class="modal-overlay">
   <div class="modal data-edit-modal">
-    <h2>Scenario Data Editor</h2>
-    <div class="scenario-note" style="margin-bottom:9px;">
-      Edit only the selected Route Templates or Orders. These changes update the current scenario workspace and become the input to the next Lite ReOp or Full Model run. Use the filters to narrow the list, then select one or many rows.
+    <div class="data-edit-head">
+      <h2 id="data-edit-title">Scenario Data Editor: Route Templates</h2>
+      <div class="data-edit-head-note">Select one or many rows, choose the edit fields above, then apply changes. Filters support multiple selections.</div>
     </div>
     <div class="data-edit-tabs">
       <button id="data-edit-tab-routes" class="btn primary data-edit-tab" onclick="scenarioDataEditorSetTab('routes')">Route Templates</button>
@@ -1076,13 +1254,13 @@ body{background:var(--bg0);color:var(--text1);}
     <div id="data-edit-filters" class="data-edit-filterbar"></div>
     <div id="data-edit-table" class="data-edit-table-wrap"></div>
 
-    <div class="modal-actions" style="flex:0 0 auto;">
+    <div class="data-edit-footer">
       <button class="btn" onclick="scenarioDataEditorSelectVisible(true)">Select Visible</button>
       <button class="btn" onclick="scenarioDataEditorSelectVisible(false)">Clear Selection</button>
       <button class="btn" onclick="scenarioDataEditorClearFilters()">Clear Filters</button>
       <span style="flex:1"></span>
-      <button class="btn" onclick="closeModal('scenario-data-editor-modal')">Close</button>
       <button class="btn primary" onclick="scenarioDataEditorApply()">Apply Changes to Selected</button>
+      <button class="btn" onclick="closeModal('scenario-data-editor-modal')">Close</button>
     </div>
   </div>
 </div>
@@ -1153,6 +1331,7 @@ body{background:var(--bg0);color:var(--text1);}
 <script>
 
 // ============================================================
+// V58 — MANIFEST-STYLE DATA EDITOR LAYOUT ONLY; V57 DATA/LAYOVER LOGIC UNCHANGED.
 // V57 — SCENARIO DATA EDITOR + CUSTOM LAYOVER PLANNING
 // ============================================================
 let scenarioDataEditorTab='routes';
@@ -1270,7 +1449,7 @@ function scenarioDataEditorRouteControls(){
     deApplyFieldCard('de-r-ap-truck','Truck Key',`<div class="field"><input id="de-r-truck" list="de-truck-options" placeholder="Truck Key"/><datalist id="de-truck-options">${trucksList.map(v=>`<option value="${deEsc(v)}"></option>`).join('')}</datalist></div>`),
     deApplyFieldCard('de-r-ap-initial','Initial Location',`<div class="field"><input id="de-r-initial" list="de-depot-options" placeholder="LocationKey"/><datalist id="de-depot-options">${depots.map(v=>`<option value="${deEsc(v)}"></option>`).join('')}</datalist></div>`),
     deApplyFieldCard('de-r-ap-final','Final Location',`<div class="field"><input id="de-r-final" list="de-depot-options" placeholder="LocationKey"/></div>`),
-    `<div class="data-edit-card"><div class="data-edit-card-title">Convert / Adjust Layover</div><button class="btn" style="width:100%;justify-content:center;" onclick="scenarioOpenRouteLayoverPlan()">Configure Layover…</button><div class="data-edit-note">Applies to selected routes only.</div></div>`
+    `<div class="data-edit-card"><button class="btn" onclick="scenarioOpenRouteLayoverPlan()">Configure Layover…</button><div class="data-edit-card-title">Convert / Adjust Layover</div></div>`
   ].join('');
 }
 function scenarioDataEditorOrderControls(){
@@ -1283,7 +1462,7 @@ function scenarioDataEditorOrderControls(){
     deApplyFieldCard('de-o-ap-early-date','Earliest Time Window Date','<div class="field"><input id="de-o-early-date" type="date"/></div>'),
     deApplyFieldCard('de-o-ap-initial','Initial Location',`<div class="field"><input id="de-o-initial" list="de-order-depot-options" placeholder="LocationKey"/><datalist id="de-order-depot-options">${depots.map(v=>`<option value="${deEsc(v)}"></option>`).join('')}</datalist></div>`),
     deApplyFieldCard('de-o-ap-final','Final Location',`<div class="field"><input id="de-o-final" list="de-order-depot-options" placeholder="LocationKey"/></div>`),
-    `<div class="data-edit-card"><div class="data-edit-card-title">Convert / Adjust Layover</div><button class="btn" style="width:100%;justify-content:center;" onclick="scenarioOpenOrderLayoverPlan()">Configure Layover Stop(s)…</button><div class="data-edit-note">Tagged orders may optimize onto layover routes only.</div></div>`
+    `<div class="data-edit-card"><button class="btn" onclick="scenarioOpenOrderLayoverPlan()">Configure Layover Stop(s)…</button><div class="data-edit-card-title">Convert / Adjust Layover</div></div>`
   ].join('');
 }
 function scenarioDataEditorFiltersHtml(){
@@ -1338,6 +1517,8 @@ function scenarioDataEditorRender(){
   oc.style.display=scenarioDataEditorTab==='orders'?'grid':'none';
   document.getElementById('data-edit-tab-routes').className='btn data-edit-tab'+(scenarioDataEditorTab==='routes'?' primary':'');
   document.getElementById('data-edit-tab-orders').className='btn data-edit-tab'+(scenarioDataEditorTab==='orders'?' primary':'');
+  const deTitle=document.getElementById('data-edit-title');
+  if(deTitle)deTitle.textContent=`Scenario Data Editor: ${scenarioDataEditorTab==='routes'?'Route Templates':'Orders'}`;
   if(!rc.dataset.ready){rc.innerHTML=scenarioDataEditorRouteControls();rc.dataset.ready='1';}
   if(!oc.dataset.ready){oc.innerHTML=scenarioDataEditorOrderControls();oc.dataset.ready='1';}
   document.getElementById('data-edit-filters').innerHTML=scenarioDataEditorFiltersHtml();
