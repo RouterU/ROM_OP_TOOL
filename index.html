@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V58 Manifest-Style Data Editor / V57 Foundation</title>
+<title>RouteER - V59 Data Editor Fixes / V58 Foundation</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -638,6 +638,53 @@ body{background:var(--bg0);color:var(--text1);}
 }
 </style>
 
+
+<style>
+/* V59 — Data Editor fixes only; optimizer and routing behavior unchanged. */
+#scenario-data-editor-modal .data-edit-card{
+  padding-top:20px!important;
+}
+#scenario-data-editor-modal .data-edit-apply{
+  top:6px!important;
+  right:8px!important;
+  height:18px!important;
+  min-width:55px!important;
+  padding:1px 5px!important;
+  display:flex!important;
+  align-items:center!important;
+  justify-content:flex-end!important;
+  gap:4px!important;
+  line-height:16px!important;
+  border-radius:4px!important;
+  background:rgba(20,20,20,.72)!important;
+  color:#e8e9ed!important;
+  white-space:nowrap!important;
+  box-sizing:border-box!important;
+}
+#scenario-data-editor-modal .data-edit-apply input{
+  width:12px!important;
+  height:12px!important;
+  margin:0!important;
+  flex:0 0 auto!important;
+}
+#scenario-data-editor-modal .data-edit-row.routes,
+#scenario-data-editor-modal .data-edit-row.orders{
+  grid-template-columns:var(--de-grid)!important;
+  min-width:var(--de-min-width,1370px)!important;
+}
+#scenario-data-editor-modal .data-edit-row .de-cell{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+#scenario-data-editor-modal .data-edit-row .de-cell:hover{
+  overflow:visible;
+  white-space:normal;
+  overflow-wrap:anywhere;
+}
+</style>
+
 </head>
 <body>
 
@@ -1240,7 +1287,7 @@ body{background:var(--bg0);color:var(--text1);}
   <div class="modal data-edit-modal">
     <div class="data-edit-head">
       <h2 id="data-edit-title">Scenario Data Editor: Route Templates</h2>
-      <div class="data-edit-head-note">Select one or many rows, choose the edit fields above, then apply changes. Filters support multiple selections.</div>
+      <div class="data-edit-head-note">Select one or many rows, choose the edit fields above, then apply changes. The table shows every field retained from the imported source row(s). Filters support multiple selections.</div>
     </div>
     <div class="data-edit-tabs">
       <button id="data-edit-tab-routes" class="btn primary data-edit-tab" onclick="scenarioDataEditorSetTab('routes')">Route Templates</button>
@@ -1331,6 +1378,7 @@ body{background:var(--bg0);color:var(--text1);}
 <script>
 
 // ============================================================
+// V59 — Data Editor fixes: aligned Apply controls, functional multi-select filters, all imported fields in tables. Optimizer unchanged.
 // V58 — MANIFEST-STYLE DATA EDITOR LAYOUT ONLY; V57 DATA/LAYOVER LOGIC UNCHANGED.
 // V57 — SCENARIO DATA EDITOR + CUSTOM LAYOVER PLANNING
 // ============================================================
@@ -1410,7 +1458,10 @@ function deFilterDropdown(section,key,label,values){
   const selected=deFilterValues(section,key);
   const opts=deUnique(values);
   return `<div class="data-edit-filter"><details><summary>${deEsc(deFilterSummary(section,key,label))} ▾</summary><div class="data-edit-filter-menu">
-    ${opts.length?opts.map(v=>`<label class="data-edit-filter-option"><input type="checkbox" ${selected.has(v)?'checked':''} onchange="deToggleFilter('${section}','${key}',${JSON.stringify(v)},this.checked)"/><span>${deEsc(v)}</span></label>`).join(''):'<div style="font-size:10px;color:var(--text3);padding:4px;">No values</div>'}
+    ${opts.length?opts.map(v=>{
+      const enc=encodeURIComponent(v);
+      return `<label class="data-edit-filter-option"><input type="checkbox" ${selected.has(v)?'checked':''} onchange="deToggleFilter('${section}','${key}',decodeURIComponent('${enc}'),this.checked)"/><span>${deEsc(v)}</span></label>`;
+    }).join(''):'<div style="font-size:10px;color:var(--text3);padding:4px;">No values</div>'}
   </div></details></div>`;
 }
 function deRouteRows(){
@@ -1487,27 +1538,90 @@ function scenarioDataEditorFiltersHtml(){
     deFilterDropdown('orders','earlyImported','Earliest Imported',rows.map(s=>rawImportedDateTime(s.earliestTimeWindowRaw||'')))
   ].join('');
 }
+
+function deRawScalar(v){
+  if(v===null||v===undefined)return '';
+  if(typeof v==='string'||typeof v==='number'||typeof v==='boolean')return String(v);
+  if(v instanceof Date)return v.toISOString();
+  return '';
+}
+function deRouteImportedSource(route){
+  // All Templates retains the original Route Template row in routeTemplateFields/raw.
+  // Route Detail imports retain their raw source rows in routeData.rawRows.
+  if(route?.routeTemplateFields&&typeof route.routeTemplateFields==='object')return route.routeTemplateFields;
+  if(route?.raw&&typeof route.raw==='object')return route.raw;
+  const rawRows=route?.routeData?.rawRows;
+  if(Array.isArray(rawRows)&&rawRows.length)return rawRows[0]||{};
+  return {};
+}
+function deOrderRawRows(stop){
+  const orderRows=Array.isArray(stop?.orders)&&stop.orders.length?stop.orders:[stop];
+  const raws=[];
+  orderRows.forEach(o=>{
+    if(o?.raw&&typeof o.raw==='object')raws.push(o.raw);
+  });
+  if(!raws.length&&Array.isArray(stop?.routeData?.rawRows))raws.push(...stop.routeData.rawRows);
+  if(!raws.length&&stop?.raw&&typeof stop.raw==='object')raws.push(stop.raw);
+  return raws;
+}
+function deImportedColumns(kind,rows){
+  const keys=[];
+  const seen=new Set();
+  if(kind==='routes'){
+    rows.forEach(r=>Object.keys(deRouteImportedSource(r)).forEach(k=>{
+      const key=String(k||'').trim();
+      if(key&&!seen.has(key)){seen.add(key);keys.push(key);}
+    }));
+  }else{
+    rows.forEach(s=>deOrderRawRows(s).forEach(raw=>Object.keys(raw||{}).forEach(k=>{
+      const key=String(k||'').trim();
+      if(key&&!seen.has(key)){seen.add(key);keys.push(key);}
+    })));
+  }
+  return keys;
+}
+function deImportedRouteValue(route,key){
+  return deRawScalar(deRouteImportedSource(route)?.[key]);
+}
+function deImportedOrderValue(stop,key){
+  const vals=deOrderRawRows(stop)
+    .map(raw=>deRawScalar(raw?.[key]))
+    .filter(v=>v!=='');
+  return deUnique(vals).join(' | ');
+}
+function deGridForColumns(count){
+  // checkbox + dynamic imported columns; wide horizontal scrolling is intentional,
+  // matching the Route Manifest behavior when many fields are present.
+  return `36px repeat(${Math.max(1,count)}, minmax(125px, 1fr))`;
+}
+function deRowStyleForColumns(count){
+  const width=Math.max(1370,36+Math.max(1,count)*145);
+  return `--de-grid:${deGridForColumns(count)};--de-min-width:${width}px;`;
+}
+function deTableCell(value){
+  const s=(value??'').toString();
+  return `<div class="de-cell" title="${deEsc(s)}">${deEsc(s||'—')}</div>`;
+}
+
 function scenarioDataEditorTableHtml(){
   if(scenarioDataEditorTab==='routes'){
     const rows=deRouteRows();
-    return `<div class="data-edit-row routes header"><div></div><div>Route #</div><div>Route Name</div><div>Start</div><div>End</div><div>Initial</div><div>Final</div><div>Truck Key</div><div>Layover</div></div>`+
-      rows.map(r=>`<div class="data-edit-row routes ${scenarioDataEditorSelectedRoutes.has(r.id)?'selected':''}" onclick="scenarioDataEditorToggleRow('routes','${r.id}',event)">
+    const cols=deImportedColumns('routes',routes);
+    const style=deRowStyleForColumns(cols.length);
+    return `<div class="data-edit-row routes header" style="${style}"><div></div>${cols.map(c=>deTableCell(c)).join('')}</div>`+
+      rows.map(r=>`<div class="data-edit-row routes ${scenarioDataEditorSelectedRoutes.has(r.id)?'selected':''}" style="${style}" onclick="scenarioDataEditorToggleRow('routes','${r.id}',event)">
         <div><input type="checkbox" ${scenarioDataEditorSelectedRoutes.has(r.id)?'checked':''} onclick="event.stopPropagation();scenarioDataEditorToggleRow('routes','${r.id}',event,this.checked)"/></div>
-        <div>${deEsc(r.udfNumber1||'—')}</div><div><strong>${deEsc(r.name||r.resourceName||r.routeTemplateKey||'Route')}</strong></div>
-        <div>${deEsc(rawImportedDateTime(deRouteStartRaw(r))||'—')}</div><div>${deEsc(rawImportedDateTime(deRouteEndRaw(r))||'—')}</div>
-        <div>${deEsc(r.initialLocationKey||'—')}</div><div>${deEsc(r.finalLocationKey||'—')}</div><div>${deEsc(r.truckKey||'—')}</div>
-        <div>${r.scenarioCustomLayover?`Yes · ${deEsc(r.scenarioLayoverPlan?.days||'')} day(s)`:(scenarioRouteIsLayover(r)?'Imported Layover':'No')}</div>
+        ${cols.map(c=>deTableCell(deImportedRouteValue(r,c))).join('')}
       </div>`).join('');
   }
+
   const rows=deOrderRows();
-  return `<div class="data-edit-row orders header"><div></div><div>Customer</div><div>Customer #</div><div>Order(s)</div><div>Preferred Resource</div><div>Pref Seq</div><div>Earliest Time</div><div>Latest Time</div><div>Earliest Imported</div><div>Layover</div></div>`+
-    rows.map(s=>`<div class="data-edit-row orders ${scenarioDataEditorSelectedStops.has(s.id)?'selected':''}" onclick="scenarioDataEditorToggleRow('orders','${s.id}',event)">
+  const cols=deImportedColumns('orders',stops.filter(s=>!scenarioIsFixedRouteAnchor(s)));
+  const style=deRowStyleForColumns(cols.length);
+  return `<div class="data-edit-row orders header" style="${style}"><div></div>${cols.map(c=>deTableCell(c)).join('')}</div>`+
+    rows.map(s=>`<div class="data-edit-row orders ${scenarioDataEditorSelectedStops.has(s.id)?'selected':''}" style="${style}" onclick="scenarioDataEditorToggleRow('orders','${s.id}',event)">
       <div><input type="checkbox" ${scenarioDataEditorSelectedStops.has(s.id)?'checked':''} onclick="event.stopPropagation();scenarioDataEditorToggleRow('orders','${s.id}',event,this.checked)"/></div>
-      <div><strong>${deEsc(s.customerName||'Stop')}</strong><div style="font-size:8px;color:var(--text3);">${deEsc(s.city||'')} ${deEsc(s.state||'')}</div></div>
-      <div>${deEsc(s.customerNumber||s.shipToId||s.locationKey||'—')}</div><div>${deEsc(orderLabel(s)||'—')}</div>
-      <div>${deEsc(s.preferredResourceKey||'—')}</div><div>${deEsc(s.preferredRouteSequence||'—')}</div>
-      <div>${deEsc(deTimeOnly(s.earliestTimeWindowRaw||s.earliestTimeWindow)||'—')}</div><div>${deEsc(deTimeOnly(s.latestTimeWindowRaw||s.latestTimeWindow)||'—')}</div>
-      <div>${deEsc(rawImportedDateTime(s.earliestTimeWindowRaw||'')||'—')}</div><div>${s.scenarioLayoverOnly?'Layover Only':'No'}</div>
+      ${cols.map(c=>deTableCell(deImportedOrderValue(s,c))).join('')}
     </div>`).join('');
 }
 function scenarioDataEditorRender(){
