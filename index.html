@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>RouteER - V56 App Workflow Enhancements / V55 Foundation</title>
+<title>RouteER - V56 + TW Resequence / Anchor Sequencing</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -3393,6 +3393,10 @@ function openStopContextMenu(stopId,x,y){
     <button class="stop-context-item ${stop.routeId?'':'disabled'}" onclick="${stop.routeId?`contextManualResequenceRoute('${stop.routeId}')`:'return false'}">
       <span>Manual Re-sequence</span><span>☰</span>
     </button>
+    ${v56AnchorSession
+      ? `<button class="stop-context-item ${stop.routeId===v56AnchorSession.routeId?'':'disabled'}" onclick="${stop.routeId===v56AnchorSession.routeId?'v56ExecuteAnchorSequence()':'return false'}"><span>Execute Sequence</span><span>✓</span></button>
+         <button class="stop-context-item" onclick="v56CancelAnchorSequence()"><span>Cancel Anchor</span><span>×</span></button>`
+      : `<button class="stop-context-item ${stop.routeId?'':'disabled'}" onclick="${stop.routeId?`v56StartAnchorSequence('${stopId}')`:'return false'}"><span>Anchor</span><span>⚓</span></button>`}
     <button class="stop-context-item ${stop.routeId?'':'disabled'}" onclick="${stop.routeId?`contextShowAlongRoad('${stop.routeId}')`:'return false'}">
       <span>Show Along The Road</span><span>🛣</span>
     </button>
@@ -3425,6 +3429,7 @@ function openRouteContextMenu(routeId,x,y){
   menu.innerHTML=`
     <div class="stop-context-title">${escapeHtml(routeDisplayName(route))}</div>
     <button class="stop-context-item" onclick="contextManualResequenceRoute('${routeId}')"><span>Manual Re-sequence</span><span>☰</span></button>
+    <button class="stop-context-item" onclick="v56ResequenceRouteByTW('${routeId}')"><span>Re-sequence by TW</span><span>⏱</span></button>
     <button class="stop-context-item" onclick="contextResequenceRoute('${routeId}')"><span>Auto Resequence by Distance</span><span>⌁</span></button>
     <button class="stop-context-item" onclick="contextShowAlongRoad('${routeId}')"><span>Show Along The Road</span><span>🛣</span></button>
     <button class="stop-context-item ${roadPolylines[routeId]?'':'disabled'}" onclick="${roadPolylines[routeId]?`contextHideAlongRoad('${routeId}')`:'return false'}"><span>Hide Along The Road</span><span>⛔</span></button>
@@ -3838,6 +3843,175 @@ function resequnceRouteByDistance(routeId){
   render();
   return {ok:true,count:ordered.length};
 }
+
+
+// ============================================================
+// V56 USER FEEDBACK ENHANCEMENTS — TW RESEQUENCE + ANCHOR
+// No Scenario optimizer, import, export, filter, or other V56 logic changed.
+// ============================================================
+let v56AnchorSession=null;
+
+function v56TwEval(route,ordered){
+  let cursor=timeToMinutes(routeStartTime(route));
+  if(cursor===null)cursor=0;
+  cursor+=durationToMinutes(route.startupTime);
+  let prev=routeInitialDepot(route);
+  let miles=0,lateStops=0,lateMinutes=0,waitMinutes=0;
+
+  for(const stop of ordered){
+    if(prev&&prev.lat&&prev.lng&&stop.lat&&stop.lng){
+      const leg=haversine(prev.lat,prev.lng,stop.lat,stop.lng);
+      miles+=roadAdjustedMiles(leg);
+      cursor+=driveMinutesForMiles(leg);
+    }
+    const raw=cursor;
+    const tw=windowStatusForStop(stop,raw);
+    if(tw.status==='LATE'){
+      lateStops++;
+      const late=timeToMinutes(stop.latestTimeWindow);
+      if(late!==null){
+        let adjustedLate=late;
+        const early=timeToMinutes(stop.earliestTimeWindow);
+        if(early!==null&&late<early&&raw%1440>=early)adjustedLate+=1440;
+        lateMinutes+=Math.max(0,raw-adjustedLate);
+      }else lateMinutes+=1;
+    }
+    waitMinutes+=tw.waitMins||0;
+    cursor=tw.adjustedArrive+stopServiceMinutes(stop);
+    prev=stop;
+  }
+
+  const fin=routeFinalDepot(route);
+  if(prev&&fin&&prev.lat&&prev.lng&&fin.lat&&fin.lng){
+    const leg=haversine(prev.lat,prev.lng,fin.lat,fin.lng);
+    miles+=roadAdjustedMiles(leg);
+    cursor+=driveMinutesForMiles(leg);
+  }
+  cursor+=durationToMinutes(route.windupTime);
+  return {lateStops,lateMinutes,miles,waitMinutes,end:cursor};
+}
+function v56TwScore(e){
+  // On-time delivery is absolute priority. Mileage/efficiency breaks ties.
+  return e.lateStops*1e12+e.lateMinutes*1e9+e.miles*1e4+e.waitMinutes;
+}
+function v56BuildTwSeed(route,routeStops){
+  const remaining=[...routeStops],ordered=[];
+  let cursor=timeToMinutes(routeStartTime(route));if(cursor===null)cursor=0;
+  cursor+=durationToMinutes(route.startupTime);
+  let prev=routeInitialDepot(route)||getRouteDepotPoint(route,routeStops);
+
+  while(remaining.length){
+    let bestIndex=0,bestScore=Infinity;
+    remaining.forEach((s,i)=>{
+      const leg=prev&&prev.lat&&prev.lng&&s.lat&&s.lng?haversine(prev.lat,prev.lng,s.lat,s.lng):0;
+      const arr=cursor+driveMinutesForMiles(leg);
+      const tw=windowStatusForStop(s,arr);
+      const latePenalty=tw.status==='LATE'?1e9:0;
+      const latest=timeToMinutes(s.latestTimeWindow);
+      const urgency=latest===null?1440:latest;
+      const score=latePenalty+urgency*10000+roadAdjustedMiles(leg)*100+(tw.waitMins||0);
+      if(score<bestScore){bestScore=score;bestIndex=i;}
+    });
+    const next=remaining.splice(bestIndex,1)[0];
+    if(prev&&prev.lat&&prev.lng&&next.lat&&next.lng)cursor+=driveMinutesForMiles(haversine(prev.lat,prev.lng,next.lat,next.lng));
+    const tw=windowStatusForStop(next,cursor);
+    cursor=tw.adjustedArrive+stopServiceMinutes(next);
+    ordered.push(next);prev=next;
+  }
+  return ordered;
+}
+function v56ImproveTwSequence(route,seed){
+  let best=[...seed],ev=v56TwEval(route,best),score=v56TwScore(ev);
+  let changed=true,pass=0;
+  while(changed&&pass<10){
+    changed=false;pass++;
+    outer:
+    for(let i=0;i<best.length;i++){
+      for(let j=0;j<best.length;j++){
+        if(i===j)continue;
+        const c=[...best],[m]=c.splice(i,1);c.splice(j,0,m);
+        const ce=v56TwEval(route,c),cs=v56TwScore(ce);
+        if(cs+1e-7<score){best=c;ev=ce;score=cs;changed=true;break outer;}
+      }
+    }
+  }
+  return {order:best,eval:ev};
+}
+function v56ResequenceRouteByTW(routeId){
+  closeStopContextMenu();
+  const route=routes.find(r=>r.id===routeId);
+  if(!route){showToast('Route not found');return;}
+  const rs=stops.filter(s=>s.routeId===routeId&&s.lat&&s.lng).sort((a,b)=>a.seq-b.seq);
+  if(rs.length<2){showToast('Route needs at least 2 geocoded stops');return;}
+  const current=v56TwEval(route,rs);
+  const result=v56ImproveTwSequence(route,v56BuildTwSeed(route,rs));
+  if(v56TwScore(result.eval)>v56TwScore(current)+1e-7){
+    showToast('Current route sequence is already better for time windows.');
+    return;
+  }
+  orderWithStartFinalLocks(routeId,result.order).forEach((s,i)=>s.seq=i+1);
+  expanded.add(routeId);render();
+  showToast(result.eval.lateStops===0
+    ? `Re-sequence by TW complete: 100% on time · ${result.eval.miles.toFixed(1)} estimated road miles`
+    : `Best TW sequence applied · ${result.eval.lateStops} stop(s) remain outside their delivery window`);
+}
+
+function v56RefreshAnchorMarkers(){
+  const ids=new Set(v56AnchorSession?.selectedIds||[]);
+  Object.entries(markers||{}).forEach(([id,m])=>m.getElement&&m.getElement()?.classList.toggle('v56-anchor-selected',ids.has(id)));
+}
+function v56StartAnchorSequence(stopId){
+  const s=stops.find(x=>x.id===stopId);
+  if(!s||!s.routeId){showToast('Anchor requires a routed stop');return;}
+  v56AnchorSession={routeId:s.routeId,selectedIds:[stopId],anchorOriginalSeq:s.seq};
+  closeStopContextMenu();v56RefreshAnchorMarkers();
+  showToast(`Anchor started at stop ${s.seq}. Click each next stop in sequence, then right-click a stop and choose Execute Sequence.`);
+}
+function v56AddAnchorStop(stopId){
+  if(!v56AnchorSession)return false;
+  const s=stops.find(x=>x.id===stopId);
+  if(!s)return true;
+  if(s.routeId!==v56AnchorSession.routeId){showToast('Anchor selections must stay on the same route.');return true;}
+  if(v56AnchorSession.selectedIds.includes(stopId)){showToast('That stop is already selected.');return true;}
+  v56AnchorSession.selectedIds.push(stopId);v56RefreshAnchorMarkers();
+  showToast(`Anchor sequence: ${v56AnchorSession.selectedIds.length} stops selected.`);
+  return true;
+}
+function v56ExecuteAnchorSequence(){
+  if(!v56AnchorSession){showToast('No Anchor sequence is active');return;}
+  const session=v56AnchorSession;
+  if(session.selectedIds.length<2){showToast('Select at least 2 stops before Execute Sequence');return;}
+  const rs=stops.filter(s=>s.routeId===session.routeId).sort((a,b)=>a.seq-b.seq);
+  const selected=session.selectedIds.map(id=>rs.find(s=>s.id===id)).filter(Boolean);
+  if(selected.length!==session.selectedIds.length){showToast('An anchored stop is no longer on this route');return;}
+
+  const idSet=new Set(session.selectedIds);
+  const anchor=selected[0],anchorIndex=rs.indexOf(anchor);
+  const remaining=rs.filter(s=>!idSet.has(s.id));
+  const insertAt=rs.slice(0,anchorIndex).filter(s=>!idSet.has(s.id)).length;
+  remaining.splice(insertAt,0,...selected);
+  remaining.forEach((s,i)=>s.seq=i+1);
+
+  v56AnchorSession=null;expanded.add(session.routeId);closeStopContextMenu();render();
+  v56RefreshAnchorMarkers();
+  showToast(`Sequence executed: ${selected.length} selected stops now begin at stop ${insertAt+1}.`);
+}
+function v56CancelAnchorSequence(){
+  v56AnchorSession=null;closeStopContextMenu();v56RefreshAnchorMarkers();showToast('Anchor sequence cancelled.');
+}
+
+// While Anchor mode is active, clicking a route marker selects it instead of filtering the map.
+document.addEventListener('click',function(e){
+  if(!v56AnchorSession)return;
+  const icon=e.target.closest&&e.target.closest('.leaflet-marker-icon');
+  if(!icon)return;
+  for(const [sid,m] of Object.entries(markers||{})){
+    if(m.getElement&&m.getElement()===icon){
+      e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
+      v56AddAnchorStop(sid);return;
+    }
+  }
+},true);
 
 document.addEventListener('click',e=>{
   const menu=document.getElementById('stop-context-menu');
@@ -15923,6 +16097,16 @@ openScenarioAfterActionReport=function(){
   }
 };
 </script>
+
+
+<style>
+.leaflet-marker-icon.v56-anchor-selected{
+  filter:drop-shadow(0 0 11px #f0a23a) brightness(1.35);
+  transform:scale(1.28);
+  transform-origin:center center;
+  z-index:9999!important;
+}
+</style>
 
 </body>
 </html>
